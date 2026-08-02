@@ -66,6 +66,14 @@ type GranolaNote = {
   synced: boolean;
 };
 
+type GranolaNotesPage = {
+  configured: boolean;
+  notes: GranolaNote[];
+  hasMore: boolean;
+  cursor: string | null;
+  error?: string;
+};
+
 type CheckRequest = {
   claim: string;
   manual: boolean;
@@ -101,6 +109,9 @@ const DEFAULT_STATUS: ProviderStatus = {
   knowledgeSources: 0,
   evidenceChunks: 0,
 };
+
+const GRANOLA_PAGE_SIZE = 30;
+const MAX_GRANOLA_PAGES = 5;
 
 const STATE_COPY: Record<AgentState, string> = {
   idle: "Standing by",
@@ -264,6 +275,7 @@ export function ReceiptsApp() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const recognitionRef = useRef<BrowserRecognition | null>(null);
   const fallbackRecognitionStartedRef = useRef(false);
+  const initialGranolaRefreshStartedRef = useRef(false);
   const suppressMicRef = useRef(false);
   const pcmFrameRef = useRef<number[]>([]);
   const utterancesRef = useRef<string[]>([]);
@@ -802,16 +814,45 @@ export function ReceiptsApp() {
     sessionIdRef.current = crypto.randomUUID();
   }, []);
 
-  const loadGranola = useCallback(async () => {
-    setDrawer("sources");
+  const refreshGranola = useCallback(async () => {
     setGranolaLoading(true);
     setGranolaMessage("");
     try {
-      const response = await fetch("/api/granola");
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Unable to load Granola");
-      setGranolaNotes(payload.notes ?? []);
-      if (!payload.configured) {
+      const notes = new Map<string, GranolaNote>();
+      const seenCursors = new Set<string>();
+      let cursor: string | null = null;
+      let configured = true;
+
+      for (let page = 0; page < MAX_GRANOLA_PAGES; page += 1) {
+        const query = new URLSearchParams({
+          page_size: String(GRANOLA_PAGE_SIZE),
+        });
+        if (cursor) query.set("cursor", cursor);
+
+        const response = await fetch(`/api/granola?${query.toString()}`, {
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as GranolaNotesPage;
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Unable to load Granola");
+        }
+        configured = payload.configured;
+        for (const note of payload.notes ?? []) notes.set(note.id, note);
+
+        if (!payload.hasMore || !payload.cursor || seenCursors.has(payload.cursor)) {
+          break;
+        }
+        seenCursors.add(payload.cursor);
+        cursor = payload.cursor;
+      }
+
+      setGranolaNotes(
+        [...notes.values()].sort(
+          (left, right) =>
+            new Date(right.created_at).getTime() - new Date(left.created_at).getTime(),
+        ),
+      );
+      if (!configured) {
         setGranolaMessage("Add a Granola API key to sync a private demo corpus.");
       }
     } catch (error) {
@@ -820,6 +861,17 @@ export function ReceiptsApp() {
       setGranolaLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (initialGranolaRefreshStartedRef.current) return;
+    initialGranolaRefreshStartedRef.current = true;
+    void refreshGranola();
+  }, [refreshGranola]);
+
+  const loadGranola = useCallback(() => {
+    setDrawer("sources");
+    void refreshGranola();
+  }, [refreshGranola]);
 
   const syncGranola = useCallback(async () => {
     if (!selectedNotes.size) return;
