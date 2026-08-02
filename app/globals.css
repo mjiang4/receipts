@@ -1290,7 +1290,7 @@ input:focus-visible {
   gap: 8px;
 }
 
-.note-picker label {
+.note-picker > div {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -1298,29 +1298,17 @@ input:focus-visible {
   border: 1px solid var(--line);
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.42);
-  cursor: pointer;
-  transition: background 130ms ease, border-color 130ms ease;
 }
 
-.note-picker label:hover { background: var(--white); border-color: rgba(23,23,20,.25); }
-.note-picker label.is-synced {
-  border-color: rgba(92, 136, 63, 0.28);
-  background: rgba(211, 238, 202, 0.56);
-}
-.note-picker label.is-synced:hover {
-  border-color: rgba(92, 136, 63, 0.42);
-  background: rgba(211, 238, 202, 0.78);
-}
-.note-picker input { width: 17px; height: 17px; accent-color: #8cae18; }
-.note-picker label > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.note-picker > div > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .note-picker strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .note-picker small { color: var(--muted); font-size: 9px; }
 .note-picker em {
   margin-left: auto;
   padding: 4px 7px;
   border-radius: 999px;
-  background: rgba(92, 136, 63, 0.14);
-  color: #426334;
+  background: rgba(23, 23, 20, 0.07);
+  color: var(--muted);
   font-size: 8px;
   font-style: normal;
   font-weight: 800;

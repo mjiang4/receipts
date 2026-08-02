@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, notInArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import { evidenceChunks, knowledgeSources } from "@/db/schema";
 import {
@@ -10,6 +10,7 @@ import {
 } from "@/lib/granola";
 
 const MAX_SELECTED_NOTES = 20;
+const MAX_REPLACEMENT_NOTES = 3;
 const FETCH_CONCURRENCY = 4;
 const CHUNK_INSERT_BATCH_SIZE = 10;
 
@@ -75,10 +76,22 @@ export async function POST(request: Request) {
       });
     }
 
+    if (noteIdsResult.replaceExisting) {
+      await db
+        .delete(knowledgeSources)
+        .where(
+          and(
+            eq(knowledgeSources.provider, "granola"),
+            notInArray(knowledgeSources.externalId, noteIdsResult.noteIds),
+          ),
+        );
+    }
+
     return Response.json({
       provider: "granola",
       synced_count: synced.length,
       synced,
+      replaced_existing: noteIdsResult.replaceExisting,
     });
   } catch (error) {
     return databaseErrorResponse(error);
@@ -86,7 +99,7 @@ export async function POST(request: Request) {
 }
 
 function parseNoteIds(payload: unknown):
-  | { noteIds: string[] }
+  | { noteIds: string[]; replaceExisting: boolean }
   | { error: string; code: string } {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     return {
@@ -96,6 +109,8 @@ function parseNoteIds(payload: unknown):
   }
 
   const noteIds = (payload as Record<string, unknown>).noteIds;
+  const replaceExisting =
+    (payload as Record<string, unknown>).replaceExisting === true;
   if (!Array.isArray(noteIds)) {
     return {
       error: "noteIds must be an array of Granola note IDs.",
@@ -124,8 +139,14 @@ function parseNoteIds(payload: unknown):
       code: "duplicate_note_id",
     };
   }
+  if (replaceExisting && normalized.length > MAX_REPLACEMENT_NOTES) {
+    return {
+      error: `The active Granola set is limited to ${MAX_REPLACEMENT_NOTES} notes.`,
+      code: "invalid_replacement_note_count",
+    };
+  }
 
-  return { noteIds: normalized };
+  return { noteIds: normalized, replaceExisting };
 }
 
 async function upsertSource(

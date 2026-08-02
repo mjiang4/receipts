@@ -110,8 +110,7 @@ const DEFAULT_STATUS: ProviderStatus = {
   evidenceChunks: 0,
 };
 
-const GRANOLA_PAGE_SIZE = 30;
-const MAX_GRANOLA_PAGES = 5;
+const ACTIVE_GRANOLA_NOTE_COUNT = 3;
 
 const STATE_COPY: Record<AgentState, string> = {
   idle: "Standing by",
@@ -267,7 +266,6 @@ export function ReceiptsApp() {
   const [granolaNotes, setGranolaNotes] = useState<GranolaNote[]>([]);
   const [granolaLoading, setGranolaLoading] = useState(false);
   const [granolaMessage, setGranolaMessage] = useState("");
-  const [selectedNotes, setSelectedNotes] = useState<Set<string>>(new Set());
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -818,42 +816,59 @@ export function ReceiptsApp() {
     setGranolaLoading(true);
     setGranolaMessage("");
     try {
-      const notes = new Map<string, GranolaNote>();
-      const seenCursors = new Set<string>();
-      let cursor: string | null = null;
-      let configured = true;
-
-      for (let page = 0; page < MAX_GRANOLA_PAGES; page += 1) {
-        const query = new URLSearchParams({
-          page_size: String(GRANOLA_PAGE_SIZE),
-        });
-        if (cursor) query.set("cursor", cursor);
-
-        const response = await fetch(`/api/granola?${query.toString()}`, {
-          cache: "no-store",
-        });
-        const payload = (await response.json()) as GranolaNotesPage;
-        if (!response.ok) {
-          throw new Error(payload.error ?? "Unable to load Granola");
-        }
-        configured = payload.configured;
-        for (const note of payload.notes ?? []) notes.set(note.id, note);
-
-        if (!payload.hasMore || !payload.cursor || seenCursors.has(payload.cursor)) {
-          break;
-        }
-        seenCursors.add(payload.cursor);
-        cursor = payload.cursor;
+      const query = new URLSearchParams({
+        page_size: String(ACTIVE_GRANOLA_NOTE_COUNT),
+      });
+      const response = await fetch(`/api/granola?${query.toString()}`, {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as GranolaNotesPage;
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Unable to load Granola");
+      }
+      if (!payload.configured) {
+        setGranolaMessage("Add a Granola API key to sync a private demo corpus.");
+        setGranolaNotes([]);
+        return;
       }
 
-      setGranolaNotes(
-        [...notes.values()].sort(
+      const latestNotes = (payload.notes ?? [])
+        .sort(
           (left, right) =>
             new Date(right.created_at).getTime() - new Date(left.created_at).getTime(),
-        ),
+        )
+        .slice(0, ACTIVE_GRANOLA_NOTE_COUNT)
+        .map((note) => ({ ...note, synced: false }));
+      setGranolaNotes(latestNotes);
+
+      if (!latestNotes.length) {
+        setGranolaMessage("No completed Granola notes are available yet.");
+        return;
+      }
+
+      const syncResponse = await fetch("/api/granola/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          noteIds: latestNotes.map((note) => note.id),
+          replaceExisting: true,
+        }),
+      });
+      const syncPayload = await syncResponse.json();
+      if (!syncResponse.ok) {
+        throw new Error(syncPayload.error ?? "Unable to sync the latest notes");
+      }
+
+      setGranolaNotes((current) =>
+        current.map((note) => ({ ...note, synced: true })),
       );
-      if (!configured) {
-        setGranolaMessage("Add a Granola API key to sync a private demo corpus.");
+      setGranolaMessage(
+        `${latestNotes.length} latest Granola note${latestNotes.length === 1 ? " is" : "s are"} active.`,
+      );
+      const statusResponse = await fetch("/api/status", { cache: "no-store" });
+      if (statusResponse.ok) {
+        const nextStatus = await statusResponse.json();
+        setStatus({ ...DEFAULT_STATUS, ...nextStatus });
       }
     } catch (error) {
       setGranolaMessage(error instanceof Error ? error.message : "Unable to load Granola");
@@ -870,43 +885,7 @@ export function ReceiptsApp() {
 
   const loadGranola = useCallback(() => {
     setDrawer("sources");
-    void refreshGranola();
-  }, [refreshGranola]);
-
-  const syncGranola = useCallback(async () => {
-    if (!selectedNotes.size) return;
-    setGranolaLoading(true);
-    setGranolaMessage("Syncing selected notes…");
-    try {
-      const response = await fetch("/api/granola/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ noteIds: [...selectedNotes] }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Sync failed");
-      setGranolaMessage(
-        `${payload.synced_count ?? selectedNotes.size} notes are ready for fact-checking.`,
-      );
-      const syncedIds = new Set<string>(
-        (payload.synced ?? []).map((note: { id: string }) => note.id),
-      );
-      setGranolaNotes((current) =>
-        current.map((note) =>
-          syncedIds.has(note.id) ? { ...note, synced: true } : note,
-        ),
-      );
-      fetch("/api/status")
-        .then((result) => result.json())
-        .then((nextStatus) => setStatus({ ...DEFAULT_STATUS, ...nextStatus }))
-        .catch(() => undefined);
-      setSelectedNotes(new Set());
-    } catch (error) {
-      setGranolaMessage(error instanceof Error ? error.message : "Sync failed");
-    } finally {
-      setGranolaLoading(false);
-    }
-  }, [selectedNotes]);
+  }, []);
 
   return (
     <main className={cx("app-shell", joined && "app-shell--meeting")}>
@@ -1076,8 +1055,8 @@ export function ReceiptsApp() {
             </div>
 
             <div className="drawer__body sources-panel">
-                <h2>Choose what Receipts can fact-check against.</h2>
-                <p>Only selected notes are copied into Receipts’ private searchable index.</p>
+                <h2>Your three most recent Granola notes.</h2>
+                <p>Receipts refreshes this active set whenever the website loads.</p>
                 <div className="source-summary">
                   <span className="source-summary__mark">G</span>
                   <span><strong>Granola</strong><small>{status.granola ? "Credentials configured" : "API key needed"}</small></span>
@@ -1087,30 +1066,15 @@ export function ReceiptsApp() {
                 {granolaMessage && <div className="panel-message">{granolaMessage}</div>}
                 <div className="note-picker">
                   {granolaNotes.map((note) => (
-                    <label key={note.id} className={cx(note.synced && "is-synced")}>
-                      <input
-                        type="checkbox"
-                        checked={selectedNotes.has(note.id)}
-                        onChange={() => {
-                          setSelectedNotes((current) => {
-                            const next = new Set(current);
-                            if (next.has(note.id)) next.delete(note.id);
-                            else next.add(note.id);
-                            return next;
-                          });
-                        }}
-                      />
+                    <div key={note.id}>
                       <span>
                         <strong>{note.title || "Untitled meeting"}</strong>
                         <small>{formatDate(note.created_at)}</small>
                       </span>
-                      {note.synced && <em>Synced</em>}
-                    </label>
+                      <em>{note.synced ? "Active" : "Loading"}</em>
+                    </div>
                   ))}
                 </div>
-                <button className="primary-button primary-button--panel" disabled={!selectedNotes.size || granolaLoading} onClick={syncGranola}>
-                  Sync {selectedNotes.size || "selected"} note{selectedNotes.size === 1 ? "" : "s"} <span>→</span>
-                </button>
                 <div className="index-stat">
                   <strong>{status.knowledgeSources}</strong><span>source notes</span>
                   <strong>{status.evidenceChunks}</strong><span>searchable moments</span>
