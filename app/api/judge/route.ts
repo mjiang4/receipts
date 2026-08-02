@@ -1,7 +1,6 @@
 import { and, eq, gt } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
-  activeKnowledgeSources,
   evidenceChunks,
   judgeReceipts,
   knowledgeSources,
@@ -80,10 +79,6 @@ async function loadEvidence(): Promise<EvidenceRecord[]> {
       speakerSource: evidenceChunks.speakerSource,
     })
     .from(evidenceChunks)
-    .innerJoin(
-      activeKnowledgeSources,
-      eq(evidenceChunks.sourceId, activeKnowledgeSources.sourceId),
-    )
     .innerJoin(knowledgeSources, eq(evidenceChunks.sourceId, knowledgeSources.id))
     .limit(1_500);
 

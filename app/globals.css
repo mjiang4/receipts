@@ -1290,7 +1290,7 @@ input:focus-visible {
   gap: 8px;
 }
 
-.note-picker__item {
+.note-picker label {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -1298,25 +1298,35 @@ input:focus-visible {
   border: 1px solid var(--line);
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.42);
+  cursor: pointer;
+  transition: background 130ms ease, border-color 130ms ease;
 }
 
-.note-picker__item > i {
-  display: grid;
-  place-items: center;
-  width: 19px;
-  height: 19px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: rgba(182, 223, 38, 0.22);
-  color: #637c0f;
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 900;
+.note-picker label:hover { background: var(--white); border-color: rgba(23,23,20,.25); }
+.note-picker label.is-synced {
+  border-color: rgba(92, 136, 63, 0.28);
+  background: rgba(211, 238, 202, 0.56);
 }
-
-.note-picker__item > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.note-picker label.is-synced:hover {
+  border-color: rgba(92, 136, 63, 0.42);
+  background: rgba(211, 238, 202, 0.78);
+}
+.note-picker input { width: 17px; height: 17px; accent-color: #8cae18; }
+.note-picker label > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .note-picker strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .note-picker small { color: var(--muted); font-size: 9px; }
+.note-picker em {
+  margin-left: auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(92, 136, 63, 0.14);
+  color: #426334;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
 
 .primary-button--panel {
   width: 100%;
@@ -1335,71 +1345,6 @@ input:focus-visible {
 
 .index-stat strong { font-family: Georgia, serif; font-size: 23px; font-weight: 400; }
 .index-stat span { color: var(--muted); font-size: 9px; text-transform: uppercase; }
-
-.eval-score {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 20px;
-  align-items: center;
-  margin-bottom: 25px;
-  padding: 20px;
-  border: 1px solid #cedc85;
-  border-radius: 19px;
-  background: rgba(223, 255, 99, 0.18);
-}
-
-.eval-score > span {
-  font-family: Georgia, serif;
-  font-size: 46px;
-  letter-spacing: -0.06em;
-}
-
-.eval-score > span small { color: var(--muted); font-size: 20px; }
-.eval-score div { display: flex; flex-direction: column; gap: 5px; }
-.eval-score strong { font-size: 13px; }
-.eval-score p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
-
-.eval-list { display: flex; flex-direction: column; gap: 9px; }
-
-.eval-list article {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 12px;
-  align-items: start;
-  padding: 15px;
-  border: 1px solid var(--line);
-  border-radius: 15px;
-  background: rgba(255, 255, 255, 0.45);
-}
-
-.eval-result {
-  display: grid;
-  place-items: center;
-  width: 25px;
-  height: 25px;
-  border-radius: 50%;
-  background: #f1cabf;
-  color: #9b4638;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.eval-result.is-passing { background: rgba(182,223,38,.23); color: #667d12; }
-.eval-list article > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
-.eval-list small { color: #7c7e74; font-size: 7px; font-weight: 800; letter-spacing: .07em; }
-.eval-list strong { font-size: 12px; }
-.eval-list p { margin: 2px 0 0; font-family: Georgia, serif; font-size: 12px; line-height: 1.35; }
-.eval-list em { color: var(--muted); font-size: 9px; font-style: normal; line-height: 1.4; }
-.eval-list button {
-  min-width: 48px;
-  min-height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--white);
-  cursor: pointer;
-  font-size: 9px;
-  font-weight: 700;
-}
 
 @keyframes tiny-wave {
   to { transform: scaleY(0.35); opacity: 0.5; }
@@ -1531,8 +1476,6 @@ input:focus-visible {
   .drawer__header { min-height: 66px; padding: 0 18px; }
   .drawer__body { padding: 23px 18px 35px; }
   .sources-panel h2 { font-size: 31px; }
-  .eval-list article { grid-template-columns: auto 1fr; }
-  .eval-list article > button { grid-column: 2; justify-self: start; }
 }
 
 @media (prefers-reduced-motion: reduce) {

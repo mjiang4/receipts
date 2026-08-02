@@ -1,27 +1,11 @@
 import { env } from "cloudflare:workers";
-import {
-  DEFAULT_GRANOLA_FOLDER_NAME,
-  DEFAULT_GRANOLA_NOTE_LIMIT,
-  GranolaDefaultSelectionError,
-  MAX_DEFAULT_GRANOLA_NOTE_LIMIT,
-  resolveGranolaFolder,
-  selectMostRecentGranolaNotes,
-} from "./granola-defaults";
 
 const GRANOLA_API_BASE_URL = "https://public-api.granola.ai";
 const REQUEST_TIMEOUT_MS = 15_000;
-const GRANOLA_PAGE_SIZE = 30;
-const MAX_PAGINATION_PAGES = 20;
-const MIN_REQUEST_INTERVAL_MS = 210;
 const NOTE_ID_PATTERN = /^not_[a-zA-Z0-9]{14}$/;
-const FOLDER_ID_PATTERN = /^fol_[a-zA-Z0-9]{14}$/;
-let nextGranolaRequestAt = 0;
 
 type RuntimeEnv = {
   GRANOLA_API_KEY?: string;
-  GRANOLA_DEFAULT_FOLDER_ID?: string;
-  GRANOLA_DEFAULT_FOLDER_NAME?: string;
-  GRANOLA_DEFAULT_NOTE_LIMIT?: string;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -42,25 +26,6 @@ export type GranolaNoteList = {
   notes: GranolaNoteListItem[];
   hasMore: boolean;
   cursor: string | null;
-};
-
-export type GranolaFolderListItem = {
-  id: string;
-  object: "folder";
-  name: string;
-  parent_folder_id: string | null;
-};
-
-export type GranolaFolderList = {
-  folders: GranolaFolderListItem[];
-  hasMore: boolean;
-  cursor: string | null;
-};
-
-export type DefaultGranolaSelection = {
-  folder: GranolaFolderListItem;
-  notes: GranolaNoteListItem[];
-  limit: number;
 };
 
 export type NormalizedEvidenceChunk = {
@@ -101,10 +66,6 @@ export function isGranolaConfigured() {
 
 export function isGranolaNoteId(value: string) {
   return NOTE_ID_PATTERN.test(value);
-}
-
-export function isGranolaFolderId(value: string) {
-  return FOLDER_ID_PATTERN.test(value);
 }
 
 export function toGranolaRouteError(error: unknown) {
@@ -156,61 +117,6 @@ export async function listGranolaNotes(options: {
   };
 }
 
-export async function listGranolaFolders(options: {
-  pageSize: number;
-  cursor?: string;
-}): Promise<GranolaFolderList> {
-  const searchParams = new URLSearchParams({
-    page_size: String(options.pageSize),
-  });
-  if (options.cursor) {
-    searchParams.set("cursor", options.cursor);
-  }
-
-  const payload = await granolaRequest(`/v1/folders?${searchParams.toString()}`);
-  const record = requireRecord(payload, "Granola returned an invalid folder list.");
-  if (!Array.isArray(record.folders) || typeof record.hasMore !== "boolean") {
-    throw invalidResponse("Granola returned an invalid folder list.");
-  }
-
-  const cursor = record.cursor;
-  if (cursor !== null && typeof cursor !== "string") {
-    throw invalidResponse("Granola returned an invalid folder pagination cursor.");
-  }
-  if (record.hasMore && !cursor) {
-    throw invalidResponse("Granola omitted the next folder pagination cursor.");
-  }
-
-  return {
-    folders: record.folders.map(parseFolderListItem),
-    hasMore: record.hasMore,
-    cursor,
-  };
-}
-
-export async function listDefaultGranolaNotes(): Promise<DefaultGranolaSelection> {
-  const config = readDefaultGranolaConfig();
-  const folders = await listAllGranolaFolders(config.folderId);
-
-  let folder: GranolaFolderListItem;
-  try {
-    folder = resolveGranolaFolder(folders, config);
-  } catch (error) {
-    throw defaultSelectionError(error, config.folderName);
-  }
-
-  const notes = await listAllGranolaNotes(folder.id);
-  try {
-    return {
-      folder,
-      notes: selectMostRecentGranolaNotes(notes, config.limit),
-      limit: config.limit,
-    };
-  } catch (error) {
-    throw defaultSelectionError(error, folder.name);
-  }
-}
-
 export async function fetchGranolaNotes(
   noteIds: string[],
   concurrency = 4
@@ -241,107 +147,6 @@ function readGranolaApiKey() {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function readDefaultGranolaConfig() {
-  const runtimeEnv = env as unknown as RuntimeEnv;
-  const folderName =
-    runtimeEnv.GRANOLA_DEFAULT_FOLDER_NAME?.trim() ||
-    DEFAULT_GRANOLA_FOLDER_NAME;
-  const folderId = runtimeEnv.GRANOLA_DEFAULT_FOLDER_ID?.trim() || undefined;
-  const rawLimit = runtimeEnv.GRANOLA_DEFAULT_NOTE_LIMIT?.trim();
-  const limit = rawLimit ? Number(rawLimit) : DEFAULT_GRANOLA_NOTE_LIMIT;
-
-  if (folderId && !isGranolaFolderId(folderId)) {
-    throw new GranolaError(
-      "GRANOLA_DEFAULT_FOLDER_ID is not a valid Granola folder ID.",
-      "granola_default_folder_invalid",
-      503,
-    );
-  }
-  if (!folderName || folderName.length > 120) {
-    throw new GranolaError(
-      "GRANOLA_DEFAULT_FOLDER_NAME must contain between 1 and 120 characters.",
-      "granola_default_folder_invalid",
-      503,
-    );
-  }
-  if (
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > MAX_DEFAULT_GRANOLA_NOTE_LIMIT
-  ) {
-    throw new GranolaError(
-      `GRANOLA_DEFAULT_NOTE_LIMIT must be between 1 and ${MAX_DEFAULT_GRANOLA_NOTE_LIMIT}.`,
-      "granola_default_limit_invalid",
-      503,
-    );
-  }
-
-  return { folderName, folderId, limit };
-}
-
-async function listAllGranolaFolders(stopAtFolderId?: string) {
-  const folders: GranolaFolderListItem[] = [];
-  const seenCursors = new Set<string>();
-  let cursor: string | undefined;
-
-  for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
-    const result = await listGranolaFolders({
-      pageSize: GRANOLA_PAGE_SIZE,
-      cursor,
-    });
-    folders.push(...result.folders);
-    if (
-      stopAtFolderId &&
-      result.folders.some((folder) => folder.id === stopAtFolderId)
-    ) {
-      return folders;
-    }
-    if (!result.hasMore) return folders;
-
-    const nextCursor = result.cursor!;
-    if (seenCursors.has(nextCursor)) {
-      throw invalidResponse("Granola repeated a folder pagination cursor.");
-    }
-    seenCursors.add(nextCursor);
-    cursor = nextCursor;
-  }
-
-  throw new GranolaError(
-    "The Granola folder list is too large to resolve safely.",
-    "granola_pagination_limit",
-    502,
-  );
-}
-
-async function listAllGranolaNotes(folderId: string) {
-  const notes: GranolaNoteListItem[] = [];
-  const seenCursors = new Set<string>();
-  let cursor: string | undefined;
-
-  for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
-    const result = await listGranolaNotes({
-      pageSize: GRANOLA_PAGE_SIZE,
-      folderId,
-      cursor,
-    });
-    notes.push(...result.notes);
-    if (!result.hasMore) return notes;
-
-    const nextCursor = result.cursor!;
-    if (seenCursors.has(nextCursor)) {
-      throw invalidResponse("Granola repeated a note pagination cursor.");
-    }
-    seenCursors.add(nextCursor);
-    cursor = nextCursor;
-  }
-
-  throw new GranolaError(
-    "The default Granola folder is too large to load safely.",
-    "granola_pagination_limit",
-    502,
-  );
-}
-
 async function granolaRequest(path: string): Promise<unknown> {
   const apiKey = readGranolaApiKey();
   if (!apiKey) {
@@ -356,32 +161,23 @@ async function granolaRequest(path: string): Promise<unknown> {
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      await waitForGranolaRateSlot();
-      const response = await fetch(`${GRANOLA_API_BASE_URL}${path}`, {
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        signal: controller.signal,
-      });
+    const response = await fetch(`${GRANOLA_API_BASE_URL}${path}`, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: controller.signal,
+    });
 
-      if (response.status === 429 && attempt === 0) {
-        await waitForGranolaRetry(response.headers.get("Retry-After"));
-        continue;
-      }
-
-      if (!response.ok) {
-        throw errorForStatus(response.status);
-      }
-
-      try {
-        return await response.json();
-      } catch {
-        throw invalidResponse("Granola returned a non-JSON response.");
-      }
+    if (!response.ok) {
+      throw errorForStatus(response.status);
     }
-    throw errorForStatus(429);
+
+    try {
+      return await response.json();
+    } catch {
+      throw invalidResponse("Granola returned a non-JSON response.");
+    }
   } catch (error) {
     if (error instanceof GranolaError) {
       throw error;
@@ -401,27 +197,6 @@ async function granolaRequest(path: string): Promise<unknown> {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-async function waitForGranolaRateSlot() {
-  const now = Date.now();
-  const scheduledAt = Math.max(now, nextGranolaRequestAt);
-  nextGranolaRequestAt = scheduledAt + MIN_REQUEST_INTERVAL_MS;
-  if (scheduledAt > now) {
-    await new Promise((resolve) => setTimeout(resolve, scheduledAt - now));
-  }
-}
-
-async function waitForGranolaRetry(value: string | null) {
-  const seconds = value ? Number(value) : Number.NaN;
-  const parsedDate = value ? Date.parse(value) : Number.NaN;
-  const requestedDelay = Number.isFinite(seconds)
-    ? seconds * 1_000
-    : Number.isFinite(parsedDate)
-      ? parsedDate - Date.now()
-      : 1_000;
-  const delay = Math.max(250, Math.min(3_000, requestedDelay));
-  await new Promise((resolve) => setTimeout(resolve, delay));
 }
 
 function errorForStatus(status: number) {
@@ -483,32 +258,6 @@ function parseNoteListItem(value: unknown): GranolaNoteListItem {
       note.updated_at,
       "Granola returned a note without updated_at."
     ),
-  };
-}
-
-function parseFolderListItem(value: unknown): GranolaFolderListItem {
-  const folder = requireRecord(value, "Granola returned invalid folder metadata.");
-  const id = requireString(folder.id, "Granola returned a folder without an ID.");
-  if (!isGranolaFolderId(id)) {
-    throw invalidResponse("Granola returned a malformed folder ID.");
-  }
-  const name = requireString(
-    folder.name,
-    "Granola returned a folder without a name.",
-  );
-  const parentFolderId = folder.parent_folder_id;
-  if (
-    parentFolderId !== null &&
-    (typeof parentFolderId !== "string" || !isGranolaFolderId(parentFolderId))
-  ) {
-    throw invalidResponse("Granola returned an invalid parent folder ID.");
-  }
-
-  return {
-    id,
-    object: "folder",
-    name,
-    parent_folder_id: parentFolderId,
   };
 }
 
@@ -632,33 +381,4 @@ function optionalString(value: unknown) {
 
 function invalidResponse(message: string) {
   return new GranolaError(message, "granola_invalid_response", 502);
-}
-
-function defaultSelectionError(error: unknown, folderName: string) {
-  if (!(error instanceof GranolaDefaultSelectionError)) {
-    return error;
-  }
-
-  if (error.code === "folder_missing") {
-    return new GranolaError(
-      `Receipts could not find an accessible Granola folder named “${folderName}”. Create it in Granola or share it with this API key.`,
-      "granola_default_folder_not_found",
-      404,
-    );
-  }
-  if (error.code === "folder_id_missing") {
-    return new GranolaError(
-      "The configured Granola default folder ID is not accessible to this API key. Check GRANOLA_DEFAULT_FOLDER_ID and its sharing permissions.",
-      "granola_default_folder_id_not_found",
-      404,
-    );
-  }
-  if (error.code === "folder_ambiguous") {
-    return new GranolaError(
-      `More than one accessible Granola folder is named “${folderName}”. Set GRANOLA_DEFAULT_FOLDER_ID to choose one.`,
-      "granola_default_folder_ambiguous",
-      409,
-    );
-  }
-  return invalidResponse(error.message);
 }

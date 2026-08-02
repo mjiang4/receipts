@@ -1,3 +1,6 @@
+import { eq } from "drizzle-orm";
+import { getDb } from "@/db";
+import { knowledgeSources } from "@/db/schema";
 import {
   isGranolaConfigured,
   listGranolaNotes,
@@ -36,11 +39,14 @@ export async function GET(request: Request) {
   }
 
   try {
-    const result = await listGranolaNotes({
-      pageSize: pageSizeResult,
-      cursor: cursorResult.value,
-      folderId: folderResult.value,
-    });
+    const [result, syncedNoteIds] = await Promise.all([
+      listGranolaNotes({
+        pageSize: pageSizeResult,
+        cursor: cursorResult.value,
+        folderId: folderResult.value,
+      }),
+      readSyncedGranolaNoteIds(),
+    ]);
 
     return Response.json({
       provider: "granola",
@@ -50,6 +56,7 @@ export async function GET(request: Request) {
         title,
         created_at,
         updated_at,
+        synced: syncedNoteIds.has(id),
       })),
       hasMore: result.hasMore,
       cursor: result.cursor,
@@ -65,6 +72,22 @@ export async function GET(request: Request) {
       },
       { status: routeError.status }
     );
+  }
+}
+
+async function readSyncedGranolaNoteIds() {
+  try {
+    const rows = await getDb()
+      .select({ externalId: knowledgeSources.externalId })
+      .from(knowledgeSources)
+      .where(eq(knowledgeSources.provider, "granola"));
+
+    return new Set(
+      rows.flatMap(({ externalId }) => (externalId ? [externalId] : [])),
+    );
+  } catch {
+    // Listing Granola notes should still work before D1 is available.
+    return new Set<string>();
   }
 }
 

@@ -9,5 +9,3 @@ CREATE TABLE `sync_leases` (
 	`token` text NOT NULL,
 	`expires_at` text NOT NULL
 );
---> statement-breakpoint
-PRAGMA optimize;

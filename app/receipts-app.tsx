@@ -12,10 +12,6 @@ import {
   flushIdleSentenceBatch,
   splitFinalizedSentences,
 } from "@/lib/transcript-batching";
-import {
-  DEFAULT_GRANOLA_FOLDER_NAME,
-  DEFAULT_GRANOLA_NOTE_LIMIT,
-} from "@/lib/granola-defaults";
 
 type AgentState =
   | "idle"
@@ -64,22 +60,7 @@ type GranolaNote = {
   title: string | null;
   created_at: string;
   updated_at?: string;
-};
-
-type EvaluationResult = {
-  id: string;
-  label: string;
-  claim: string;
-  expected: "speak" | "silent" | "conflict";
-  actual: "speak" | "silent" | "conflict";
-  note: string;
-  passed: boolean;
-};
-
-type EvaluationSuite = {
-  passed: number;
-  total: number;
-  results: EvaluationResult[];
+  synced: boolean;
 };
 
 type CheckRequest = {
@@ -277,21 +258,11 @@ export function ReceiptsApp() {
   const [caption, setCaption] = useState("");
   const [captionFinal, setCaptionFinal] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
-  const [drawer, setDrawer] = useState<"sources" | "evaluation" | null>(null);
-  const [evaluation, setEvaluation] = useState<EvaluationSuite | null>(null);
+  const [drawer, setDrawer] = useState<"sources" | null>(null);
   const [granolaNotes, setGranolaNotes] = useState<GranolaNote[]>([]);
   const [granolaLoading, setGranolaLoading] = useState(false);
   const [granolaMessage, setGranolaMessage] = useState("");
-  const [granolaFolderName, setGranolaFolderName] = useState(
-    DEFAULT_GRANOLA_FOLDER_NAME,
-  );
-  const [granolaNoteLimit, setGranolaNoteLimit] = useState(
-    DEFAULT_GRANOLA_NOTE_LIMIT,
-  );
-  const [granolaErrorCode, setGranolaErrorCode] = useState<string | null>(null);
-  const [granolaSyncState, setGranolaSyncState] = useState<
-    "idle" | "loading" | "ready" | "empty" | "error"
-  >("idle");
+  const [selectedNotes, setSelectedNotes] = useState<Set<string>>(new Set());
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -313,59 +284,29 @@ export function ReceiptsApp() {
   const dedupeRef = useRef(new Map<string, number>());
   const checkClaimRef = useRef<(claim: string, manual?: boolean, demoOnly?: boolean) => void>(() => {});
   const ttsNextTimeRef = useRef(0);
-  const granolaSyncInFlightRef = useRef(false);
-  const defaultGranolaSyncAttemptedRef = useRef(false);
 
   const featuredReceipt = receipts[0] ?? null;
   const providersConfigured =
     status.inworld && status.granola && status.tenstorrent;
 
   const providerLabel = useMemo(() => {
+    if (status.mode === "live") return "Live · checking every 2–3 sentences";
     if (providersConfigured && !status.databaseReady) {
       return "Database unavailable";
     }
-    if (providersConfigured && granolaLoading) {
-      return `Loading ${granolaFolderName}`;
-    }
-    if (providersConfigured && granolaSyncState === "error") {
-      return status.evidenceChunks > 0
-        ? "Live · using last synced notes"
-        : "Granola folder needs attention";
-    }
-    if (providersConfigured && granolaSyncState === "empty") {
-      return `${granolaFolderName} is empty`;
-    }
-    if (status.mode === "live") return "Live · checking every 2–3 sentences";
     if (providersConfigured && status.evidenceChunks === 0) {
-      return `Ready · loading ${granolaFolderName}`;
+      return "Ready · sync Granola notes";
     }
     if (status.inworld || status.granola || status.tenstorrent) {
       return "Setup incomplete";
     }
     return "Demo mode";
-  }, [
-    granolaFolderName,
-    granolaLoading,
-    granolaSyncState,
-    providersConfigured,
-    status,
-  ]);
-  const granolaRefreshLabel =
-    granolaErrorCode === "granola_default_folder_not_found" ||
-    granolaErrorCode === "granola_default_folder_ambiguous" ||
-    granolaErrorCode === "granola_default_folder_id_not_found"
-      ? "Retry after fixing folder"
-      : `Refresh latest ${granolaNoteLimit}`;
+  }, [providersConfigured, status]);
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/status").then((response) => response.json()),
-      fetch("/api/evaluate").then((response) => response.json()),
-    ])
-      .then(([nextStatus, nextEvaluation]) => {
-        setStatus({ ...DEFAULT_STATUS, ...nextStatus });
-        setEvaluation(nextEvaluation);
-      })
+    fetch("/api/status")
+      .then((response) => response.json())
+      .then((nextStatus) => setStatus({ ...DEFAULT_STATUS, ...nextStatus }))
       .catch(() => {
         setStatus(DEFAULT_STATUS);
       });
@@ -980,90 +921,59 @@ export function ReceiptsApp() {
     sessionIdRef.current = crypto.randomUUID();
   }, []);
 
-  const syncDefaultGranola = useCallback(async () => {
-    if (granolaSyncInFlightRef.current) return;
-    granolaSyncInFlightRef.current = true;
+  const loadGranola = useCallback(async () => {
+    setDrawer("sources");
     setGranolaLoading(true);
-    setGranolaSyncState("loading");
-    setGranolaErrorCode(null);
-    setGranolaMessage(
-      `Loading the latest notes from “${granolaFolderName}”…`,
-    );
+    setGranolaMessage("");
+    try {
+      const response = await fetch("/api/granola");
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Unable to load Granola");
+      setGranolaNotes(payload.notes ?? []);
+      if (!payload.configured) {
+        setGranolaMessage("Add a Granola API key to sync a private demo corpus.");
+      }
+    } catch (error) {
+      setGranolaMessage(error instanceof Error ? error.message : "Unable to load Granola");
+    } finally {
+      setGranolaLoading(false);
+    }
+  }, []);
+
+  const syncGranola = useCallback(async () => {
+    if (!selectedNotes.size) return;
+    setGranolaLoading(true);
+    setGranolaMessage("Syncing selected notes…");
     try {
       const response = await fetch("/api/granola/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ useDefaultFolder: true }),
+        body: JSON.stringify({ noteIds: [...selectedNotes] }),
       });
       const payload = await response.json();
-      if (!response.ok) {
-        setGranolaErrorCode(
-          typeof payload.code === "string" ? payload.code : "granola_sync_failed",
-        );
-        throw new Error(payload.error ?? "Unable to load the default Granola folder");
-      }
-
-      const folderName = payload.folder?.name || DEFAULT_GRANOLA_FOLDER_NAME;
-      const noteLimit =
-        Number.isSafeInteger(payload.limit) && payload.limit > 0
-          ? payload.limit
-          : DEFAULT_GRANOLA_NOTE_LIMIT;
-      const notes: GranolaNote[] = payload.notes ?? [];
-      setGranolaFolderName(folderName);
-      setGranolaNoteLimit(noteLimit);
-      setGranolaNotes(notes);
-      if (notes.length) {
-        setGranolaSyncState("ready");
-        setGranolaMessage(
-          notes.length === noteLimit
-            ? `The latest ${notes.length} notes from “${folderName}” are ready for fact-checking.`
-            : `All ${notes.length} completed note${notes.length === 1 ? "" : "s"} from “${folderName}” are ready for fact-checking.`,
-        );
-      } else {
-        setGranolaSyncState("empty");
-        setGranolaMessage(
-          `No completed notes yet. Add a meeting with a generated transcript to “${folderName}”, then refresh.`,
-        );
-      }
-
-      try {
-        const statusResponse = await fetch("/api/status");
-        if (statusResponse.ok) {
-          const nextStatus = await statusResponse.json();
-          setStatus({ ...DEFAULT_STATUS, ...nextStatus });
-        }
-      } catch {
-        // The corpus is ready even if this optional badge refresh fails.
-      }
-    } catch (error) {
-      setGranolaSyncState("error");
+      if (!response.ok) throw new Error(payload.error ?? "Sync failed");
       setGranolaMessage(
-        error instanceof Error ? error.message : "Unable to load Granola",
+        `${payload.synced_count ?? selectedNotes.size} notes are ready for fact-checking.`,
       );
+      const syncedIds = new Set<string>(
+        (payload.synced ?? []).map((note: { id: string }) => note.id),
+      );
+      setGranolaNotes((current) =>
+        current.map((note) =>
+          syncedIds.has(note.id) ? { ...note, synced: true } : note,
+        ),
+      );
+      fetch("/api/status")
+        .then((result) => result.json())
+        .then((nextStatus) => setStatus({ ...DEFAULT_STATUS, ...nextStatus }))
+        .catch(() => undefined);
+      setSelectedNotes(new Set());
+    } catch (error) {
+      setGranolaMessage(error instanceof Error ? error.message : "Sync failed");
     } finally {
-      granolaSyncInFlightRef.current = false;
       setGranolaLoading(false);
     }
-  }, [granolaFolderName]);
-
-  useEffect(() => {
-    if (
-      defaultGranolaSyncAttemptedRef.current ||
-      !status.granola ||
-      !status.databaseReady
-    ) {
-      return;
-    }
-    defaultGranolaSyncAttemptedRef.current = true;
-    void syncDefaultGranola();
-  }, [status.databaseReady, status.granola, syncDefaultGranola]);
-
-  const loadGranola = useCallback(() => {
-    setDrawer("sources");
-    if (granolaSyncState === "idle" || granolaSyncState === "error") {
-      void syncDefaultGranola();
-    }
-  }, [granolaSyncState, syncDefaultGranola]);
+  }, [selectedNotes]);
 
   return (
     <main className={cx("app-shell", joined && "app-shell--meeting")}>
@@ -1087,9 +997,6 @@ export function ReceiptsApp() {
           <button className="text-button" onClick={loadGranola}>
             Sources <span>{status.knowledgeSources || "·"}</span>
           </button>
-          <button className="text-button" onClick={() => setDrawer("evaluation")}>
-            Eval <span>{evaluation ? `${evaluation.passed}/${evaluation.total}` : "·"}</span>
-          </button>
         </div>
       </header>
 
@@ -1106,9 +1013,6 @@ export function ReceiptsApp() {
               <button className="primary-button" onClick={joinMeeting} disabled={permissionState === "requesting"}>
                 {permissionState === "requesting" ? "Opening the room…" : "Enter the demo room"}
                 <span>→</span>
-              </button>
-              <button className="secondary-button" onClick={() => setDrawer("evaluation")}>
-                See test cases
               </button>
             </div>
             {permissionState === "blocked" && (
@@ -1232,80 +1136,53 @@ export function ReceiptsApp() {
 
       {drawer && (
         <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDrawer(null)}>
-          <aside className="drawer" aria-label={drawer === "sources" ? "Knowledge sources" : "Evaluation suite"}>
+          <aside className="drawer" aria-label="Knowledge sources">
             <div className="drawer__header">
-              <span className="eyebrow"><i /> {drawer === "sources" ? "Company memory" : "Fact-check evaluation"}</span>
+              <span className="eyebrow"><i /> Company memory</span>
               <button onClick={() => setDrawer(null)} aria-label="Close panel">×</button>
             </div>
 
-            {drawer === "sources" ? (
-              <div className="drawer__body sources-panel">
-                <h2>“{granolaFolderName}” syncs when Receipts opens.</h2>
-                <p>Receipts loads the {granolaNoteLimit} most recent completed notes at startup and whenever you refresh.</p>
+            <div className="drawer__body sources-panel">
+                <h2>Choose what Receipts can fact-check against.</h2>
+                <p>Only selected notes are copied into Receipts’ private searchable index.</p>
                 <div className="source-summary">
                   <span className="source-summary__mark">G</span>
-                  <span>
-                    <strong>Granola · {granolaFolderName}</strong>
-                    <small>
-                      {granolaLoading
-                        ? "Loading latest notes"
-                        : granolaNotes.length
-                          ? `${granolaNotes.length} recent note${granolaNotes.length === 1 ? "" : "s"} ready`
-                          : granolaSyncState === "error"
-                            ? "Folder needs attention"
-                            : granolaSyncState === "empty"
-                              ? "No completed notes"
-                          : status.granola
-                            ? "Waiting for completed notes"
-                            : "API key needed"}
-                    </small>
-                  </span>
-                  <i className={cx(granolaSyncState === "ready" && "is-ready")} />
+                  <span><strong>Granola</strong><small>{status.granola ? "Credentials configured" : "API key needed"}</small></span>
+                  <i className={cx(status.granola && "is-ready")} />
                 </div>
                 {granolaLoading && <div className="panel-loading"><i /><i /><i /> Working on it</div>}
                 {granolaMessage && <div className="panel-message">{granolaMessage}</div>}
                 <div className="note-picker">
                   {granolaNotes.map((note) => (
-                    <div className="note-picker__item" key={note.id}>
-                      <i aria-hidden="true">✓</i>
-                      <span><strong>{note.title || "Untitled meeting"}</strong><small>{formatDate(note.created_at)}</small></span>
-                    </div>
+                    <label key={note.id} className={cx(note.synced && "is-synced")}>
+                      <input
+                        type="checkbox"
+                        checked={selectedNotes.has(note.id)}
+                        onChange={() => {
+                          setSelectedNotes((current) => {
+                            const next = new Set(current);
+                            if (next.has(note.id)) next.delete(note.id);
+                            else next.add(note.id);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span>
+                        <strong>{note.title || "Untitled meeting"}</strong>
+                        <small>{formatDate(note.created_at)}</small>
+                      </span>
+                      {note.synced && <em>Synced</em>}
+                    </label>
                   ))}
                 </div>
-                <button className="primary-button primary-button--panel" disabled={granolaLoading || !status.granola} onClick={syncDefaultGranola}>
-                  {granolaRefreshLabel} <span>→</span>
+                <button className="primary-button primary-button--panel" disabled={!selectedNotes.size || granolaLoading} onClick={syncGranola}>
+                  Sync {selectedNotes.size || "selected"} note{selectedNotes.size === 1 ? "" : "s"} <span>→</span>
                 </button>
                 <div className="index-stat">
                   <strong>{status.knowledgeSources}</strong><span>source notes</span>
                   <strong>{status.evidenceChunks}</strong><span>searchable moments</span>
                 </div>
               </div>
-            ) : (
-              <div className="drawer__body evaluation-panel">
-                <div className="eval-score">
-                  <span>{evaluation?.passed ?? "–"}<small>/{evaluation?.total ?? "–"}</small></span>
-                  <div><strong>Fact checks passing</strong><p>Every 2–3 sentence batch is checked; interruptions still require direct evidence.</p></div>
-                </div>
-                <div className="eval-list">
-                  {evaluation?.results.map((result, index) => (
-                    <article key={result.id}>
-                      <span className={cx("eval-result", result.passed && "is-passing")}>{result.passed ? "✓" : "!"}</span>
-                      <div>
-                        <small>0{index + 1} · EXPECT {result.expected.toUpperCase()}</small>
-                        <strong>{result.label}</strong>
-                        <p>“{result.claim}”</p>
-                        <em>{result.note}</em>
-                      </div>
-                      <button onClick={() => {
-                        setDrawer(null);
-                        if (!joined) void joinMeeting().then(() => window.setTimeout(() => checkClaimRef.current(result.claim, true, true), 700));
-                        else checkClaimRef.current(result.claim, true, true);
-                      }}>Run</button>
-                    </article>
-                  ))}
-                </div>
-              </div>
-            )}
           </aside>
         </div>
       )}
