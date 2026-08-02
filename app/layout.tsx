@@ -14,7 +14,7 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase,
     title: "Receipts",
     description:
-      "A voice-first meeting participant that catches material conflicts with the company record.",
+      "A voice-first meeting participant that checks every 2–3 sentences against the company record.",
     openGraph: {
       title: "Receipts — your meetings, with a memory",
       description:

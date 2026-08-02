@@ -4,7 +4,7 @@ import { ReceiptsApp } from "./receipts-app";
 export const metadata: Metadata = {
   title: "Receipts — your meetings, with memory",
   description:
-    "A voice-first meeting participant that catches material conflicts with the company record.",
+    "A voice-first meeting participant that checks every 2–3 sentences against the company record.",
 };
 
 export default function Home() {

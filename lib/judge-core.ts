@@ -116,6 +116,29 @@ export function rankEvidence(
     .map(({ item }) => item);
 }
 
+export function rankEvidenceForStatements(
+  statements: string[],
+  evidence: EvidenceRecord[],
+  perStatement = 4,
+  limit = 10,
+) {
+  const ranked: EvidenceRecord[] = [];
+  const seen = new Set<string>();
+
+  const add = (item: EvidenceRecord) => {
+    if (seen.has(item.id) || ranked.length >= limit) return;
+    seen.add(item.id);
+    ranked.push(item);
+  };
+
+  for (const statement of statements) {
+    rankEvidence(statement, evidence, perStatement).forEach(add);
+  }
+  rankEvidence(statements.join(" "), evidence, limit).forEach(add);
+
+  return ranked.slice(0, limit);
+}
+
 function rehearsalDecision(claim: string): JudgeDecision {
   const normalized = normalizeClaim(claim);
   const silent = (reason: string): JudgeDecision => ({

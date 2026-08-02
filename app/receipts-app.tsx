@@ -7,6 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  appendFinalizedTranscript,
+  flushIdleSentenceBatch,
+  splitFinalizedSentences,
+} from "@/lib/transcript-batching";
 
 type AgentState =
   | "idle"
@@ -21,6 +26,7 @@ type ProviderStatus = {
   tenstorrent: boolean;
   mode: "live" | "rehearsal";
   voiceId: string;
+  databaseReady: boolean;
   knowledgeSources: number;
   evidenceChunks: number;
 };
@@ -72,6 +78,12 @@ type EvaluationSuite = {
   results: EvaluationResult[];
 };
 
+type CheckRequest = {
+  claim: string;
+  manual: boolean;
+  demoOnly: boolean;
+};
+
 type SpeechResultEvent = Event & {
   resultIndex: number;
   results: ArrayLike<{
@@ -97,6 +109,7 @@ const DEFAULT_STATUS: ProviderStatus = {
   tenstorrent: false,
   mode: "rehearsal",
   voiceId: "Dennis",
+  databaseReady: false,
   knowledgeSources: 0,
   evidenceChunks: 0,
 };
@@ -277,20 +290,34 @@ export function ReceiptsApp() {
   const suppressMicRef = useRef(false);
   const pcmFrameRef = useRef<number[]>([]);
   const utterancesRef = useRef<string[]>([]);
+  const sentenceHistoryRef = useRef<string[]>([]);
+  const pendingSentencesRef = useRef<string[]>([]);
+  const sentenceBatchTimerRef = useRef<number | null>(null);
+  const lastFinalRef = useRef({ fingerprint: "", capturedAt: 0 });
   const busyRef = useRef(false);
+  const checkQueueRef = useRef<CheckRequest[]>([]);
   const sessionIdRef = useRef(crypto.randomUUID());
   const dedupeRef = useRef(new Map<string, number>());
   const checkClaimRef = useRef<(claim: string, manual?: boolean, demoOnly?: boolean) => void>(() => {});
   const ttsNextTimeRef = useRef(0);
 
   const featuredReceipt = receipts[0] ?? null;
-  const allProvidersReady = status.mode === "live";
+  const providersConfigured =
+    status.inworld && status.granola && status.tenstorrent;
 
   const providerLabel = useMemo(() => {
-    if (allProvidersReady) return "Live providers";
-    if (status.inworld || status.granola || status.tenstorrent) return "Partially connected";
-    return "Rehearsal mode";
-  }, [allProvidersReady, status]);
+    if (status.mode === "live") return "Live · checking every 2–3 sentences";
+    if (providersConfigured && !status.databaseReady) {
+      return "Database unavailable";
+    }
+    if (providersConfigured && status.evidenceChunks === 0) {
+      return "Ready · sync Granola notes";
+    }
+    if (status.inworld || status.granola || status.tenstorrent) {
+      return "Setup incomplete";
+    }
+    return "Demo mode";
+  }, [providersConfigured, status]);
 
   useEffect(() => {
     Promise.all([
@@ -312,12 +339,39 @@ export function ReceiptsApp() {
     return () => window.clearInterval(timer);
   }, [joined]);
 
+  const enqueueQueuedCheck = useCallback((request: CheckRequest) => {
+    const fingerprint = normalizeForDedupe(request.claim);
+    if (
+      checkQueueRef.current.some(
+        (queued) => normalizeForDedupe(queued.claim) === fingerprint,
+      )
+    ) {
+      return;
+    }
+
+    if (checkQueueRef.current.length >= 8) {
+      if (!request.manual) return;
+      checkQueueRef.current.pop();
+    }
+    if (request.manual) checkQueueRef.current.unshift(request);
+    else checkQueueRef.current.push(request);
+  }, []);
+
+  const drainQueuedCheck = useCallback(() => {
+    if (busyRef.current || suppressMicRef.current) return;
+    const next = checkQueueRef.current.shift();
+    if (next) {
+      checkClaimRef.current(next.claim, next.manual, next.demoOnly);
+    }
+  }, []);
+
   const releaseMicAfterSpeech = useCallback(() => {
     window.setTimeout(() => {
       suppressMicRef.current = false;
       setAgentState("listening");
+      drainQueuedCheck();
     }, 650);
-  }, []);
+  }, [drainQueuedCheck]);
 
   const speakWithBrowser = useCallback(
     (text: string) => {
@@ -499,28 +553,49 @@ export function ReceiptsApp() {
   const checkClaim = useCallback(
     async (claim: string, manual = false, demoOnly = false) => {
       const trimmed = claim.trim();
-      if (!trimmed || busyRef.current) return;
-      const normalized = normalizeForDedupe(trimmed);
+      if (!trimmed) {
+        drainQueuedCheck();
+        return;
+      }
+      const boundedClaim =
+        trimmed.length > 6_000 ? trimmed.slice(-6_000) : trimmed;
+      if (busyRef.current || suppressMicRef.current) {
+        enqueueQueuedCheck({ claim: boundedClaim, manual, demoOnly });
+        return;
+      }
+
+      const normalized = normalizeForDedupe(boundedClaim);
       const lastSeen = dedupeRef.current.get(normalized) ?? 0;
-      if (!manual && Date.now() - lastSeen < 45_000) return;
+      if (!manual && Date.now() - lastSeen < 45_000) {
+        drainQueuedCheck();
+        return;
+      }
       dedupeRef.current.set(normalized, Date.now());
       busyRef.current = true;
+      const requestSessionId = sessionIdRef.current;
       setAgentState("thinking");
 
       try {
+        const sentences = splitFinalizedSentences(boundedClaim).slice(-5);
         const response = await fetch("/api/judge", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            sessionId: sessionIdRef.current,
-            claim: trimmed,
-            utterances: utterancesRef.current.slice(-5),
+            sessionId: requestSessionId,
+            claim: boundedClaim,
+            sentences: sentences.length ? sentences : [boundedClaim],
+            utterances: utterancesRef.current
+              .slice(-5)
+              .map((utterance) => utterance.slice(-2_000)),
             manual,
             demoOnly,
           }),
         });
         const decision = await response.json();
-        if (!response.ok) throw new Error(decision.error ?? "Judge unavailable");
+        if (!response.ok) {
+          throw new Error(decision.error ?? "Fact-checker unavailable");
+        }
+        if (requestSessionId !== sessionIdRef.current) return;
 
         if (decision.action === "speak" || decision.action === "conflict") {
           const receipt: Receipt = {
@@ -531,6 +606,7 @@ export function ReceiptsApp() {
           setReceipts((current) => [receipt, ...current].slice(0, 5));
           setAgentState("found");
           if (decision.action === "speak" && decision.correction) {
+            suppressMicRef.current = true;
             window.setTimeout(() => speakCorrection(decision.correction), 180);
           } else {
             window.setTimeout(() => setAgentState("listening"), 1600);
@@ -542,9 +618,14 @@ export function ReceiptsApp() {
         setAgentState("listening");
       } finally {
         busyRef.current = false;
+        drainQueuedCheck();
       }
     },
-    [speakCorrection],
+    [
+      drainQueuedCheck,
+      enqueueQueuedCheck,
+      speakCorrection,
+    ],
   );
   useEffect(() => {
     checkClaimRef.current = checkClaim;
@@ -553,7 +634,26 @@ export function ReceiptsApp() {
   const handleFinalTranscript = useCallback((text: string) => {
     const cleaned = text.trim();
     if (!cleaned || suppressMicRef.current) return;
+    const fingerprint = normalizeForDedupe(cleaned);
+    const capturedAt = Date.now();
+    if (
+      fingerprint === lastFinalRef.current.fingerprint &&
+      capturedAt - lastFinalRef.current.capturedAt < 2_000
+    ) {
+      return;
+    }
+    lastFinalRef.current = { fingerprint, capturedAt };
+
+    if (sentenceBatchTimerRef.current !== null) {
+      window.clearTimeout(sentenceBatchTimerRef.current);
+      sentenceBatchTimerRef.current = null;
+    }
     utterancesRef.current = [...utterancesRef.current, cleaned].slice(-5);
+    const finalizedSentences = splitFinalizedSentences(cleaned);
+    sentenceHistoryRef.current = [
+      ...sentenceHistoryRef.current,
+      ...finalizedSentences,
+    ].slice(-8);
     setCaption(cleaned);
     setCaptionFinal(true);
     void fetch("/api/transcript", {
@@ -564,8 +664,46 @@ export function ReceiptsApp() {
         text: cleaned,
       }),
     }).catch(() => undefined);
-    checkClaimRef.current(cleaned, false, false);
+
+    const update = appendFinalizedTranscript(
+      pendingSentencesRef.current,
+      cleaned,
+    );
+    pendingSentencesRef.current = update.pending;
+    for (const batch of update.batches) {
+      checkClaimRef.current(batch.join(" "), false, false);
+    }
+
+    if (pendingSentencesRef.current.length >= 2) {
+      sentenceBatchTimerRef.current = window.setTimeout(() => {
+        const flushed = flushIdleSentenceBatch(pendingSentencesRef.current);
+        pendingSentencesRef.current = flushed.pending;
+        sentenceBatchTimerRef.current = null;
+        if (flushed.batch) {
+          checkClaimRef.current(flushed.batch.join(" "), false, false);
+        }
+      }, 1_500);
+    }
   }, []);
+
+  const manuallyCheckRecentSpeech = useCallback(() => {
+    if (sentenceBatchTimerRef.current !== null) {
+      window.clearTimeout(sentenceBatchTimerRef.current);
+      sentenceBatchTimerRef.current = null;
+    }
+    const pending = pendingSentencesRef.current.slice(0, 3);
+    if (pending.length) {
+      pendingSentencesRef.current = pendingSentencesRef.current.slice(
+        pending.length,
+      );
+    }
+    const recent = pending.length
+      ? pending
+      : sentenceHistoryRef.current.slice(-3);
+    const claim =
+      recent.join(" ") || utterancesRef.current.slice(-5).join(" ");
+    checkClaim(claim, true, false);
+  }, [checkClaim]);
 
   const startBrowserRecognition = useCallback(() => {
     if (fallbackRecognitionStartedRef.current) return;
@@ -762,8 +900,9 @@ export function ReceiptsApp() {
       suppressMicRef.current = false;
       setAgentState("listening");
       if (!status.inworld) startBrowserRecognition();
+      drainQueuedCheck();
     }
-  }, [micOn, startBrowserRecognition, status.inworld]);
+  }, [drainQueuedCheck, micOn, startBrowserRecognition, status.inworld]);
 
   const toggleCamera = useCallback(() => {
     const next = !cameraOn;
@@ -784,7 +923,17 @@ export function ReceiptsApp() {
     audioContextRef.current?.close().catch(() => undefined);
     streamRef.current?.getTracks().forEach((track) => track.stop());
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    if (sentenceBatchTimerRef.current !== null) {
+      window.clearTimeout(sentenceBatchTimerRef.current);
+      sentenceBatchTimerRef.current = null;
+    }
     suppressMicRef.current = false;
+    pendingSentencesRef.current = [];
+    sentenceHistoryRef.current = [];
+    utterancesRef.current = [];
+    checkQueueRef.current = [];
+    dedupeRef.current.clear();
+    lastFinalRef.current = { fingerprint: "", capturedAt: 0 };
     setJoined(false);
     setAgentState("idle");
     setCaption("");
@@ -825,7 +974,7 @@ export function ReceiptsApp() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Sync failed");
       setGranolaMessage(
-        `${payload.synced_count ?? selectedNotes.size} notes are ready for the Judge.`,
+        `${payload.synced_count ?? selectedNotes.size} notes are ready for fact-checking.`,
       );
       fetch("/api/status")
         .then((result) => result.json())
@@ -870,7 +1019,7 @@ export function ReceiptsApp() {
       {!joined ? (
         <section className="prejoin" id="top">
           <div className="prejoin__copy">
-            <span className="eyebrow"><i /> Your quiet judge</span>
+            <span className="eyebrow"><i /> Your live fact-checker</span>
             <h1>Your meetings,<br />with a <em>memory.</em></h1>
             <p>
               Receipts listens for the facts that matter, checks the company record,
@@ -882,7 +1031,7 @@ export function ReceiptsApp() {
                 <span>→</span>
               </button>
               <button className="secondary-button" onClick={() => setDrawer("evaluation")}>
-                See how it decides
+                See test cases
               </button>
             </div>
             {permissionState === "blocked" && (
@@ -892,7 +1041,7 @@ export function ReceiptsApp() {
             )}
             <div className="provider-row">
               <span className={cx(status.inworld && "is-ready")}><i /> Inworld voice</span>
-              <span className={cx(status.tenstorrent && "is-ready")}><i /> Tenstorrent Judge</span>
+              <span className={cx(status.tenstorrent && "is-ready")}><i /> Tenstorrent fact-checker</span>
               <span className={cx(status.granola && "is-ready")}><i /> Granola memory</span>
             </div>
           </div>
@@ -919,7 +1068,7 @@ export function ReceiptsApp() {
                 </div>
                 <div className="preview-listening">
                   <Mascot state="listening" compact />
-                  <span><strong>Receipts is listening</strong><small>Waiting for something worth saying</small></span>
+                  <span><strong>Receipts is listening</strong><small>Checking every 2–3 sentences</small></span>
                   <i /><i /><i /><i />
                 </div>
               </div>
@@ -935,7 +1084,13 @@ export function ReceiptsApp() {
               <span className={cx("live-pill", status.mode === "live" && "live-pill--connected")}>
                 <i /> {providerLabel}
               </span>
-              <span className="secure-pill">Audio isn’t stored</span>
+              <span className="secure-pill">
+                {!micOn
+                  ? "Mic paused"
+                  : agentState === "speaking"
+                    ? "Receipts is speaking"
+                    : "Checks every 2–3 sentences"}
+              </span>
             </div>
 
             <div className="participant-tile">
@@ -965,8 +1120,8 @@ export function ReceiptsApp() {
                 {agentState === "speaking"
                   ? featuredReceipt?.correction
                   : agentState === "thinking"
-                    ? "Comparing that with the most relevant company records…"
-                    : "I’ll only jump in for a material, well-supported contradiction."}
+                    ? "Checking the latest sentence batch against your synced sources…"
+                    : "I check every 2–3 sentences and interrupt when a source directly contradicts the conversation."}
               </p>
             </aside>
 
@@ -983,7 +1138,7 @@ export function ReceiptsApp() {
               <button className={cx("round-control", !cameraOn && "is-off")} onClick={toggleCamera} aria-label={cameraOn ? "Turn camera off" : "Turn camera on"}>
                 <span>▰</span><small>Camera</small>
               </button>
-              <button className="check-control" onClick={() => checkClaim(utterancesRef.current.slice(-5).join(" "), true, false)}>
+              <button className="check-control" onClick={manuallyCheckRecentSpeech}>
                 <Mascot state="listening" compact />
                 <span><strong>Check that</strong><small>Last few moments</small></span>
               </button>
@@ -1002,17 +1157,17 @@ export function ReceiptsApp() {
         <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDrawer(null)}>
           <aside className="drawer" aria-label={drawer === "sources" ? "Knowledge sources" : "Evaluation suite"}>
             <div className="drawer__header">
-              <span className="eyebrow"><i /> {drawer === "sources" ? "Company memory" : "Judge evaluation"}</span>
+              <span className="eyebrow"><i /> {drawer === "sources" ? "Company memory" : "Fact-check evaluation"}</span>
               <button onClick={() => setDrawer(null)} aria-label="Close panel">×</button>
             </div>
 
             {drawer === "sources" ? (
               <div className="drawer__body sources-panel">
-                <h2>Choose what the Judge remembers.</h2>
+                <h2>Choose what Receipts can fact-check against.</h2>
                 <p>Only selected notes are copied into Receipts’ private searchable index.</p>
                 <div className="source-summary">
                   <span className="source-summary__mark">G</span>
-                  <span><strong>Granola</strong><small>{status.granola ? "API connected" : "API key needed"}</small></span>
+                  <span><strong>Granola</strong><small>{status.granola ? "Credentials configured" : "API key needed"}</small></span>
                   <i className={cx(status.granola && "is-ready")} />
                 </div>
                 {granolaLoading && <div className="panel-loading"><i /><i /><i /> Working on it</div>}
@@ -1048,7 +1203,7 @@ export function ReceiptsApp() {
               <div className="drawer__body evaluation-panel">
                 <div className="eval-score">
                   <span>{evaluation?.passed ?? "–"}<small>/{evaluation?.total ?? "–"}</small></span>
-                  <div><strong>Safety checks passing</strong><p>Every interruption must earn its way into the room.</p></div>
+                  <div><strong>Fact checks passing</strong><p>Every 2–3 sentence batch is checked; interruptions still require direct evidence.</p></div>
                 </div>
                 <div className="eval-list">
                   {evaluation?.results.map((result, index) => (

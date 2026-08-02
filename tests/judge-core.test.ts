@@ -5,16 +5,19 @@ import { DEMO_EVIDENCE } from "../lib/demo-corpus";
 import {
   isCheckableClaim,
   rankEvidence,
+  rankEvidenceForStatements,
   runEvaluationSuite,
   runRehearsalJudge,
 } from "../lib/judge-core";
 
 test("the shipped surface is Receipts, not the starter", async () => {
-  const [page, layout, app, styles] = await Promise.all([
+  const [page, layout, app, styles, route, tenstorrent] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/receipts-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/judge/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/tenstorrent.ts", import.meta.url), "utf8"),
   ]);
 
   const shipped = `${page}\n${layout}\n${app}\n${styles}`;
@@ -22,9 +25,15 @@ test("the shipped surface is Receipts, not the starter", async () => {
   assert.match(shipped, /Your meetings,/);
   assert.match(shipped, /Enter the demo room/);
   assert.match(shipped, /Inworld voice/);
-  assert.match(shipped, /Tenstorrent Judge/);
+  assert.match(shipped, /Tenstorrent fact-checker/);
   assert.match(shipped, /Granola memory/);
+  assert.match(shipped, /Checks every 2–3 sentences/);
+  assert.doesNotMatch(shipped, /Audio isn’t stored|Partially connected/);
   assert.doesNotMatch(shipped, /codex-preview|Your site is taking shape|SkeletonPreview/i);
+  assert.match(app, /appendFinalizedTranscript/);
+  assert.doesNotMatch(app, /checkClaimRef\.current\(cleaned/);
+  assert.doesNotMatch(route, /isCheckableClaim/);
+  assert.doesNotMatch(tenstorrent, /parsed\.materiality\s*>=/);
 });
 
 test("evaluation suite covers speak, silence, and conflict", () => {
@@ -36,7 +45,7 @@ test("evaluation suite covers speak, silence, and conflict", () => {
   assert.ok(suite.results.some((item) => item.expected === "conflict"));
 });
 
-test("rehearsal Judge creates a brief source-backed Ahem interruption", () => {
+test("rehearsal fact-checker creates a brief source-backed Ahem interruption", () => {
   const decision = runRehearsalJudge("We agreed to launch on Monday.");
   assert.equal(decision.action, "speak");
   assert.match(decision.correction ?? "", /^Ahem\s*[—-]/);
@@ -74,4 +83,18 @@ test("retrieval ranks the relevant source ahead of unrelated records", () => {
     3,
   );
   assert.equal(ranked[0]?.sourceId, "demo-customer-review");
+});
+
+test("batch retrieval preserves evidence for multiple statements", () => {
+  const ranked = rankEvidenceForStatements(
+    [
+      "We agreed to launch on Monday.",
+      "The Northstar renewal is $150,000.",
+    ],
+    DEMO_EVIDENCE,
+    2,
+    4,
+  );
+  assert.ok(ranked.some((item) => item.sourceId === "demo-product-standup"));
+  assert.ok(ranked.some((item) => item.sourceId === "demo-customer-review"));
 });

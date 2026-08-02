@@ -8,15 +8,14 @@ import {
 } from "@/db/schema";
 import type { EvidenceRecord } from "@/lib/demo-corpus";
 import {
-  isCheckableClaim,
   normalizeClaim,
-  rankEvidence,
+  rankEvidenceForStatements,
   runRehearsalJudge,
   safeFallback,
   type JudgeDecision,
 } from "@/lib/judge-core";
 import { hasTenstorrentConfiguration } from "@/lib/runtime-env";
-import { judgeWithTenstorrent } from "@/lib/tenstorrent";
+import { factCheckWithTenstorrent } from "@/lib/tenstorrent";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEDUPE_WINDOW_MS = 45_000;
@@ -24,6 +23,7 @@ const DEDUPE_WINDOW_MS = 45_000;
 type JudgeRequest = {
   sessionId: string;
   claim: string;
+  sentences: string[];
   utterances: string[];
   manual: boolean;
   demoOnly: boolean;
@@ -34,13 +34,20 @@ function parseRequest(value: unknown): JudgeRequest | null {
   const record = value as Record<string, unknown>;
   const sessionId = record.sessionId;
   const claim = record.claim;
+  const sentences = record.sentences;
   const utterances = record.utterances;
   if (
     typeof sessionId !== "string" ||
     !SESSION_ID.test(sessionId) ||
     typeof claim !== "string" ||
     !claim.trim() ||
-    claim.length > 1_000 ||
+    claim.length > 6_000 ||
+    !Array.isArray(sentences) ||
+    sentences.length < 1 ||
+    sentences.length > 5 ||
+    !sentences.every(
+      (item) => typeof item === "string" && item.trim() && item.length <= 6_000,
+    ) ||
     !Array.isArray(utterances) ||
     utterances.length > 5 ||
     !utterances.every((item) => typeof item === "string" && item.length <= 2_000)
@@ -50,6 +57,7 @@ function parseRequest(value: unknown): JudgeRequest | null {
   return {
     sessionId,
     claim: claim.trim(),
+    sentences: sentences.map((item) => item.trim()),
     utterances: utterances.map((item) => item.trim()).filter(Boolean),
     manual: record.manual === true,
     demoOnly: record.demoOnly === true,
@@ -148,7 +156,7 @@ export async function POST(request: Request) {
   }
   const parsed = parseRequest(payload);
   if (!parsed) {
-    return Response.json({ error: "Invalid Judge request." }, { status: 400 });
+    return Response.json({ error: "Invalid fact-check request." }, { status: 400 });
   }
 
   if (!parsed.manual && (await recentlyChecked(parsed.sessionId, parsed.claim))) {
@@ -161,13 +169,14 @@ export async function POST(request: Request) {
     return Response.json(decision);
   }
 
-  if (!isCheckableClaim(parsed.claim)) {
-    return Response.json(safeFallback(parsed.claim, "Not a specific checkable claim."));
-  }
-
   let evidence: EvidenceRecord[];
   try {
-    evidence = rankEvidence(parsed.claim, await loadEvidence(), 8);
+    evidence = rankEvidenceForStatements(
+      parsed.sentences,
+      await loadEvidence(),
+      4,
+      10,
+    );
   } catch {
     return Response.json(
       safeFallback(parsed.claim, "The knowledge index is unavailable."),
@@ -179,13 +188,17 @@ export async function POST(request: Request) {
 
   let decision: JudgeDecision;
   try {
-    decision = await judgeWithTenstorrent({
+    decision = await factCheckWithTenstorrent({
       claim: parsed.claim,
+      sentences: parsed.sentences,
       recentUtterances: parsed.utterances,
       evidence,
     });
   } catch {
-    decision = safeFallback(parsed.claim, "The Judge stayed silent after a provider error.");
+    decision = safeFallback(
+      parsed.claim,
+      "The fact-checker stayed silent after a provider error.",
+    );
   }
   await persistReceipt(parsed.sessionId, decision);
   return Response.json(decision);
