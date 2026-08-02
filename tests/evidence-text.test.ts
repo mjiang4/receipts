@@ -1,21 +1,28 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { evidenceExcerpt, segmentEvidenceText } from "../lib/evidence-text";
+import { evidenceExcerpt } from "../lib/evidence-text";
 
-test("long transcript blocks become retrieval-sized evidence segments", () => {
-  const input = Array.from(
-    { length: 12 },
-    (_, index) => `Sentence ${index + 1} records an important company fact.`,
+test("receipt evidence is reduced to a short supporting excerpt", () => {
+  const note = Array.from({ length: 80 }, (_, index) =>
+    index === 44 ? "the team has fourteen people" : `word${index}`,
   ).join(" ");
-  const segments = segmentEvidenceText(input, 140);
-  assert.ok(segments.length > 1);
-  assert.ok(segments.every((segment) => segment.length <= 140));
-  assert.match(segments.join(" "), /Sentence 12/);
+  const excerpt = evidenceExcerpt(note, ["fourteen people"]);
+
+  assert.ok(excerpt.split(/\s+/).length <= 38);
+  assert.match(excerpt, /fourteen people/);
+  assert.notEqual(excerpt, note);
 });
 
-test("evidence excerpts center the corrected fact instead of dumping a note", () => {
-  const input = `${"context ".repeat(30)}the team has 14 people ${"followup ".repeat(30)}`;
-  const excerpt = evidenceExcerpt(input, ["14 people"], 18);
-  assert.match(excerpt, /14 people/);
-  assert.ok(excerpt.split(/\s+/).length <= 18);
+test("the client uses the server-side Inworld route instead of the missing websocket", async () => {
+  const [app, voiceRoute] = await Promise.all([
+    readFile(new URL("../app/receipts-app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/voice/route.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(app, /fetch\("\/api\/voice"/);
+  assert.doesNotMatch(app, /\/api\/inworld\/tts/);
+  assert.match(voiceRoute, /api\.inworld\.ai\/tts\/v1\/voice/);
+  assert.match(voiceRoute, /modelId: "inworld-tts-2"/);
+  assert.match(voiceRoute, /Authorization: `Basic/);
 });

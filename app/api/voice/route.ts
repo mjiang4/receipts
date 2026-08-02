@@ -2,7 +2,7 @@ import { getRuntimeEnv } from "@/lib/runtime-env";
 
 const INWORLD_TTS_URL = "https://api.inworld.ai/tts/v1/voice";
 const MAX_SPOKEN_CHARACTERS = 1_000;
-const TIMEOUT_MS = 12_000;
+const TIMEOUT_MS = 15_000;
 
 export async function POST(request: Request) {
   let payload: unknown;
@@ -47,14 +47,16 @@ export async function POST(request: Request) {
           audioEncoding: "LINEAR16",
           sampleRateHertz: 22050,
         },
+        language: "en-US",
         deliveryMode: "BALANCED",
         applyTextNormalization: "ON",
       }),
       signal: controller.signal,
     });
+
     if (!response.ok) {
       return Response.json(
-        { error: "Inworld could not synthesize this correction." },
+        { error: `Inworld voice returned ${response.status}.` },
         { status: 502 },
       );
     }

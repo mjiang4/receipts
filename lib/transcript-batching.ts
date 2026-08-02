@@ -40,7 +40,9 @@ export function appendFinalizedTranscript(
 }
 
 export function flushIdleSentenceBatch(pending: string[]) {
-  if (!pending.length) return { batch: null, pending: [] };
+  if (pending.length < 2) {
+    return { batch: null, pending: [...pending] };
+  }
 
   const size = Math.min(3, pending.length);
   return {

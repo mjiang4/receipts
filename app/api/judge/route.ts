@@ -7,7 +7,6 @@ import {
   meetingSessions,
 } from "@/db/schema";
 import type { EvidenceRecord } from "@/lib/demo-corpus";
-import { segmentEvidenceText } from "@/lib/evidence-text";
 import {
   normalizeClaim,
   rankEvidenceForStatements,
@@ -83,19 +82,17 @@ async function loadEvidence(): Promise<EvidenceRecord[]> {
     .innerJoin(knowledgeSources, eq(evidenceChunks.sourceId, knowledgeSources.id))
     .limit(1_500);
 
-  return rows.flatMap((row) =>
-    segmentEvidenceText(row.content).map((quote, segmentIndex) => ({
-      id: `granola-${row.chunkId}-${segmentIndex}`,
-      sourceId: row.sourceExternalId,
-      provider: "granola" as const,
-      title: row.title,
-      date: row.sourceDate,
-      url: row.webUrl,
-      quote,
-      speaker:
-        row.speakerLabel ?? row.speakerAttribution ?? row.speakerSource ?? null,
-    })),
-  );
+  return rows.map((row) => ({
+    id: `granola-${row.chunkId}`,
+    sourceId: row.sourceExternalId,
+    provider: "granola" as const,
+    title: row.title,
+    date: row.sourceDate,
+    url: row.webUrl,
+    quote: row.content,
+    speaker:
+      row.speakerLabel ?? row.speakerAttribution ?? row.speakerSource ?? null,
+  }));
 }
 
 async function recentlyChecked(sessionId: string, claim: string) {

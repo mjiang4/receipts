@@ -6,13 +6,10 @@ import {
   splitFinalizedSentences,
 } from "../lib/transcript-batching";
 
-test("one finalized sentence self-checks after the idle boundary", () => {
+test("one finalized sentence waits for more context", () => {
   const update = appendFinalizedTranscript([], "The launch is Monday.");
   assert.deepEqual(update.batches, []);
   assert.deepEqual(update.pending, ["The launch is Monday."]);
-  const flushed = flushIdleSentenceBatch(update.pending);
-  assert.deepEqual(flushed.batch, ["The launch is Monday."]);
-  assert.deepEqual(flushed.pending, []);
 });
 
 test("two sentences flush together after the idle boundary", () => {

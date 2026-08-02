@@ -193,43 +193,6 @@ function Mascot({ state, compact = false }: { state: AgentState; compact?: boole
   );
 }
 
-function HighlightedText({
-  text,
-  incorrect,
-  correct,
-}: {
-  text: string;
-  incorrect?: string | null;
-  correct?: string | null;
-}) {
-  const matches = [
-    { value: incorrect?.trim(), className: "fact-highlight fact-highlight--wrong" },
-    { value: correct?.trim(), className: "fact-highlight fact-highlight--right" },
-  ]
-    .flatMap((item) => {
-      if (!item.value) return [];
-      const start = text.toLowerCase().indexOf(item.value.toLowerCase());
-      return start < 0 ? [] : [{ ...item, start, end: start + item.value.length }];
-    })
-    .sort((a, b) => a.start - b.start)
-    .filter((item, index, all) => index === 0 || item.start >= all[index - 1].end);
-
-  if (!matches.length) return text;
-  const output: React.ReactNode[] = [];
-  let cursor = 0;
-  for (const match of matches) {
-    if (match.start > cursor) output.push(text.slice(cursor, match.start));
-    output.push(
-      <mark className={match.className} key={`${match.start}-${match.value}`}>
-        {text.slice(match.start, match.end)}
-      </mark>,
-    );
-    cursor = match.end;
-  }
-  if (cursor < text.length) output.push(text.slice(cursor));
-  return output;
-}
-
 function ReceiptCard({ receipt, featured = false }: { receipt: Receipt; featured?: boolean }) {
   const evidence = receipt.evidence[0];
   if (!evidence) return null;
@@ -243,35 +206,16 @@ function ReceiptCard({ receipt, featured = false }: { receipt: Receipt; featured
           {isConflict ? "Records conflict" : "Receipt found"}
         </span>
         <span className="receipt-card__confidence">
-          {Math.round(receipt.confidence * 100)}% confidence
+          {Math.round(receipt.confidence * 100)}% match
         </span>
       </div>
-      {receipt.correction && (
-        <p className="receipt-card__correction">
-          <HighlightedText
-            text={receipt.correction}
-            incorrect={receipt.incorrectSpan}
-            correct={receipt.correctFact}
-          />
-        </p>
-      )}
+      {receipt.correction && <p className="receipt-card__correction">{receipt.correction}</p>}
       {isConflict && (
         <p className="receipt-card__correction">
           I found two relevant records that assign this differently, so I’m staying out of it.
         </p>
       )}
-      {(receipt.incorrectSpan || receipt.correctFact) && (
-        <div className="fact-delta" aria-label="Claim correction">
-          {receipt.incorrectSpan && <span><small>Heard</small><del>{receipt.incorrectSpan}</del></span>}
-          {receipt.correctFact && <span><small>Record says</small><mark>{receipt.correctFact}</mark></span>}
-        </div>
-      )}
-      <blockquote>
-        “<HighlightedText
-          text={receipt.evidenceExcerpt || evidence.quote}
-          correct={receipt.correctFact}
-        />”
-      </blockquote>
+      <blockquote>“{receipt.evidenceExcerpt || evidence.quote}”</blockquote>
       <div className="receipt-card__source">
         <span className="receipt-card__source-mark">G</span>
         <span>
@@ -307,9 +251,6 @@ export function ReceiptsApp() {
   const [cameraOn, setCameraOn] = useState(true);
   const [caption, setCaption] = useState("");
   const [captionFinal, setCaptionFinal] = useState(false);
-  const [checkMessage, setCheckMessage] = useState("Checks run automatically");
-  const [voiceTransport, setVoiceTransport] = useState<"ready" | "inworld" | "fallback">("ready");
-  const [transcriptionTransport, setTranscriptionTransport] = useState<"connecting" | "inworld" | "browser">("connecting");
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [drawer, setDrawer] = useState<"sources" | null>(null);
   const [granolaNotes, setGranolaNotes] = useState<GranolaNote[]>([]);
@@ -321,7 +262,6 @@ export function ReceiptsApp() {
   const streamRef = useRef<MediaStream | null>(null);
   const sttSocketRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const ttsContextRef = useRef<AudioContext | null>(null);
   const recognitionRef = useRef<BrowserRecognition | null>(null);
   const fallbackRecognitionStartedRef = useRef(false);
   const suppressMicRef = useRef(false);
@@ -330,8 +270,6 @@ export function ReceiptsApp() {
   const sentenceHistoryRef = useRef<string[]>([]);
   const pendingSentencesRef = useRef<string[]>([]);
   const sentenceBatchTimerRef = useRef<number | null>(null);
-  const joinedRef = useRef(false);
-  const micOnRef = useRef(true);
   const lastFinalRef = useRef({ fingerprint: "", capturedAt: 0 });
   const busyRef = useRef(false);
   const checkQueueRef = useRef<CheckRequest[]>([]);
@@ -344,7 +282,7 @@ export function ReceiptsApp() {
     status.inworld && status.granola && status.tenstorrent;
 
   const providerLabel = useMemo(() => {
-    if (status.mode === "live") return "Live · automatic fact-checking";
+    if (status.mode === "live") return "Live · checking every 2–3 sentences";
     if (providersConfigured && !status.databaseReady) {
       return "Database unavailable";
     }
@@ -408,7 +346,6 @@ export function ReceiptsApp() {
 
   const speakWithBrowser = useCallback(
     (text: string) => {
-      setVoiceTransport("fallback");
       if (!("speechSynthesis" in window)) {
         releaseMicAfterSpeech();
         return;
@@ -427,26 +364,37 @@ export function ReceiptsApp() {
 
   const speakWithInworld = useCallback(
     async (text: string) => {
+      let audioUrl: string | null = null;
+      let settled = false;
       try {
         const response = await fetch("/api/voice", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
-        if (!response.ok) throw new Error("Inworld voice unavailable");
-        const encodedAudio = await response.arrayBuffer();
-        const context =
-          ttsContextRef.current ?? audioContextRef.current ?? new AudioContext();
-        ttsContextRef.current = context;
-        await context.resume();
-        const decoded = await context.decodeAudioData(encodedAudio.slice(0));
-        const source = context.createBufferSource();
-        source.buffer = decoded;
-        source.connect(context.destination);
-        source.onended = releaseMicAfterSpeech;
-        setVoiceTransport("inworld");
-        source.start();
+        if (!response.ok || response.headers.get("X-Receipts-Voice") !== "inworld") {
+          throw new Error("Inworld voice unavailable");
+        }
+        audioUrl = URL.createObjectURL(await response.blob());
+        const audio = new Audio(audioUrl);
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          URL.revokeObjectURL(audioUrl!);
+          releaseMicAfterSpeech();
+        };
+        audio.onended = finish;
+        audio.onerror = () => {
+          if (settled) return;
+          settled = true;
+          URL.revokeObjectURL(audioUrl!);
+          speakWithBrowser(text);
+        };
+        await audio.play();
       } catch {
+        if (settled) return;
+        settled = true;
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
         speakWithBrowser(text);
       }
     },
@@ -457,10 +405,9 @@ export function ReceiptsApp() {
     (text: string) => {
       suppressMicRef.current = true;
       setAgentState("speaking");
-      if (status.inworld) void speakWithInworld(text);
-      else speakWithBrowser(text);
+      void speakWithInworld(text);
     },
-    [speakWithBrowser, speakWithInworld, status.inworld],
+    [speakWithInworld],
   );
 
   const checkClaim = useCallback(
@@ -487,7 +434,6 @@ export function ReceiptsApp() {
       busyRef.current = true;
       const requestSessionId = sessionIdRef.current;
       setAgentState("thinking");
-      setCheckMessage(manual ? "Checking that now…" : "Checking the latest speech…");
 
       try {
         const sentences = splitFinalizedSentences(boundedClaim).slice(-5);
@@ -519,11 +465,6 @@ export function ReceiptsApp() {
           };
           setReceipts((current) => [receipt, ...current].slice(0, 5));
           setAgentState("found");
-          setCheckMessage(
-            decision.action === "speak"
-              ? "Contradiction found"
-              : "Relevant records conflict",
-          );
           if (decision.action === "speak" && decision.correction) {
             suppressMicRef.current = true;
             window.setTimeout(() => speakCorrection(decision.correction), 180);
@@ -532,15 +473,9 @@ export function ReceiptsApp() {
           }
         } else {
           setAgentState("listening");
-          setCheckMessage(
-            decision.mode === "safety-fallback"
-              ? "Check unavailable · will retry automatically"
-              : "Checked just now · no contradiction",
-          );
         }
       } catch {
         setAgentState("listening");
-        setCheckMessage("Check unavailable · will retry automatically");
       } finally {
         busyRef.current = false;
         drainQueuedCheck();
@@ -599,8 +534,7 @@ export function ReceiptsApp() {
       checkClaimRef.current(batch.join(" "), false, false);
     }
 
-    if (pendingSentencesRef.current.length > 0) {
-      const idleDelay = pendingSentencesRef.current.length >= 2 ? 1_200 : 2_300;
+    if (pendingSentencesRef.current.length >= 2) {
       sentenceBatchTimerRef.current = window.setTimeout(() => {
         const flushed = flushIdleSentenceBatch(pendingSentencesRef.current);
         pendingSentencesRef.current = flushed.pending;
@@ -608,7 +542,7 @@ export function ReceiptsApp() {
         if (flushed.batch) {
           checkClaimRef.current(flushed.batch.join(" "), false, false);
         }
-      }, idleDelay);
+      }, 1_500);
     }
   }, []);
 
@@ -646,7 +580,6 @@ export function ReceiptsApp() {
       ).webkitSpeechRecognition;
     if (!recognitionConstructor) return;
 
-    setTranscriptionTransport("browser");
     const recognition = new recognitionConstructor();
     recognition.continuous = true;
     recognition.interimResults = true;
@@ -664,7 +597,7 @@ export function ReceiptsApp() {
     };
     recognition.onerror = () => undefined;
     recognition.onend = () => {
-      if (joinedRef.current && micOnRef.current && !suppressMicRef.current) {
+      if (joined && micOn && !suppressMicRef.current) {
         try {
           recognition.start();
         } catch {
@@ -679,13 +612,15 @@ export function ReceiptsApp() {
     } catch {
       fallbackRecognitionStartedRef.current = false;
     }
-  }, [handleFinalTranscript]);
+  }, [handleFinalTranscript, joined, micOn]);
 
   const openSttSocket = useCallback(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${window.location.host}/api/inworld/stt`);
     sttSocketRef.current = socket;
+    let opened = false;
     socket.onopen = () => {
+      opened = true;
       socket.send(
         JSON.stringify({
           transcribeConfig: {
@@ -706,26 +641,12 @@ export function ReceiptsApp() {
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data));
-        if (typeof message.code === "number" && message.code !== 0) {
-          socket.close();
-          startBrowserRecognition();
-          return;
-        }
         const result = message.result;
-        if (typeof result?.status?.code === "number" && result.status.code !== 0) {
-          socket.close();
-          startBrowserRecognition();
-          return;
-        }
-        if (result?.speechStopped && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ endTurn: {} }));
-        }
         if (result?.speechStarted && !suppressMicRef.current) {
           setAgentState("listening");
           setCaptionFinal(false);
         }
         if (result?.transcription?.transcript && !suppressMicRef.current) {
-          setTranscriptionTransport("inworld");
           const text = result.transcription.transcript.trim();
           setCaption(text);
           setCaptionFinal(Boolean(result.transcription.isFinal));
@@ -736,16 +657,12 @@ export function ReceiptsApp() {
       }
     };
     socket.onerror = () => {
-      if (joinedRef.current && micOnRef.current && !suppressMicRef.current) {
-        startBrowserRecognition();
-      }
+      if (!opened) startBrowserRecognition();
     };
     socket.onclose = () => {
-      if (joinedRef.current && micOnRef.current && !suppressMicRef.current) {
-        startBrowserRecognition();
-      }
+      if (joined && !suppressMicRef.current) startBrowserRecognition();
     };
-  }, [handleFinalTranscript, startBrowserRecognition]);
+  }, [handleFinalTranscript, joined, startBrowserRecognition]);
 
   const startAudioPipeline = useCallback(async (stream: MediaStream) => {
     try {
@@ -813,13 +730,9 @@ export function ReceiptsApp() {
       }
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-      joinedRef.current = true;
-      micOnRef.current = true;
       setJoined(true);
       setPermissionState("ready");
       setAgentState("listening");
-      setCheckMessage("Listening · checks run automatically");
-      setTranscriptionTransport("connecting");
       openSttSocket();
       await startAudioPipeline(stream);
     } catch {
@@ -835,7 +748,6 @@ export function ReceiptsApp() {
 
   const toggleMic = useCallback(() => {
     const next = !micOn;
-    micOnRef.current = next;
     setMicOn(next);
     streamRef.current?.getAudioTracks().forEach((track) => {
       track.enabled = next;
@@ -876,8 +788,6 @@ export function ReceiptsApp() {
       sentenceBatchTimerRef.current = null;
     }
     suppressMicRef.current = false;
-    joinedRef.current = false;
-    micOnRef.current = true;
     pendingSentencesRef.current = [];
     sentenceHistoryRef.current = [];
     utterancesRef.current = [];
@@ -887,9 +797,6 @@ export function ReceiptsApp() {
     setJoined(false);
     setAgentState("idle");
     setCaption("");
-    setCheckMessage("Checks run automatically");
-    setVoiceTransport("ready");
-    setTranscriptionTransport("connecting");
     setElapsed(0);
     fallbackRecognitionStartedRef.current = false;
     sessionIdRef.current = crypto.randomUUID();
@@ -1023,7 +930,7 @@ export function ReceiptsApp() {
                 </div>
                 <div className="preview-listening">
                   <Mascot state="listening" compact />
-                  <span><strong>Receipts is listening</strong><small>Checking completed thoughts automatically</small></span>
+                  <span><strong>Receipts is listening</strong><small>Checking every 2–3 sentences</small></span>
                   <i /><i /><i /><i />
                 </div>
               </div>
@@ -1044,16 +951,7 @@ export function ReceiptsApp() {
                   ? "Mic paused"
                   : agentState === "speaking"
                     ? "Receipts is speaking"
-                    : checkMessage}
-              </span>
-              <span className={cx("transport-pill", (voiceTransport === "fallback" || transcriptionTransport === "browser") && "transport-pill--fallback")}>
-                {transcriptionTransport === "browser"
-                  ? "Browser transcription fallback"
-                  : voiceTransport === "fallback"
-                    ? "Browser voice fallback"
-                    : voiceTransport === "inworld"
-                      ? "Inworld voice active"
-                      : "Inworld connecting"}
+                    : "Checks every 2–3 sentences"}
               </span>
             </div>
 
@@ -1085,7 +983,7 @@ export function ReceiptsApp() {
                   ? featuredReceipt?.correction
                   : agentState === "thinking"
                     ? "Checking the latest sentence batch against your synced sources…"
-                    : "I check each completed thought automatically and interrupt when a source directly contradicts the conversation."}
+                    : "I check every 2–3 sentences and interrupt when a source directly contradicts the conversation."}
               </p>
             </aside>
 
