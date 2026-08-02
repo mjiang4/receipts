@@ -1,6 +1,9 @@
-import { count } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { evidenceChunks, knowledgeSources } from "@/db/schema";
+import {
+  activeKnowledgeSources,
+  evidenceChunks,
+} from "@/db/schema";
 import { isGranolaConfigured } from "@/lib/granola";
 import { getRuntimeEnv, hasTenstorrentConfiguration } from "@/lib/runtime-env";
 
@@ -13,8 +16,14 @@ export async function GET() {
   try {
     const db = getDb();
     const [[sources], [chunks]] = await Promise.all([
-      db.select({ value: count() }).from(knowledgeSources),
-      db.select({ value: count() }).from(evidenceChunks),
+      db.select({ value: count() }).from(activeKnowledgeSources),
+      db
+        .select({ value: count() })
+        .from(evidenceChunks)
+        .innerJoin(
+          activeKnowledgeSources,
+          eq(evidenceChunks.sourceId, activeKnowledgeSources.sourceId),
+        ),
     ]);
     knowledgeSourceCount = sources?.value ?? 0;
     evidenceChunkCount = chunks?.value ?? 0;

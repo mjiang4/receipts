@@ -1290,7 +1290,7 @@ input:focus-visible {
   gap: 8px;
 }
 
-.note-picker label {
+.note-picker__item {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -1298,13 +1298,23 @@ input:focus-visible {
   border: 1px solid var(--line);
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.42);
-  cursor: pointer;
-  transition: background 130ms ease, border-color 130ms ease;
 }
 
-.note-picker label:hover { background: var(--white); border-color: rgba(23,23,20,.25); }
-.note-picker input { width: 17px; height: 17px; accent-color: #8cae18; }
-.note-picker label > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.note-picker__item > i {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: rgba(182, 223, 38, 0.22);
+  color: #637c0f;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.note-picker__item > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .note-picker strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .note-picker small { color: var(--muted); font-size: 9px; }
 

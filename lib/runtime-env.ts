@@ -2,6 +2,9 @@ import { env } from "cloudflare:workers";
 
 export type ReceiptsRuntimeEnv = {
   GRANOLA_API_KEY?: string;
+  GRANOLA_DEFAULT_FOLDER_ID?: string;
+  GRANOLA_DEFAULT_FOLDER_NAME?: string;
+  GRANOLA_DEFAULT_NOTE_LIMIT?: string;
   INWORLD_API_KEY?: string;
   INWORLD_VOICE_ID?: string;
   TENSTORRENT_API_KEY?: string;

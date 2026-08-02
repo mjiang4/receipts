@@ -21,9 +21,16 @@ The microphone relay pauses while Receipts speaks, then resumes after a short
 cooldown so generated speech cannot enter its own transcript.
 
 The production deployment is intended to remain owner-only. D1 stores the
-selected Granola excerpts, finalized text utterances, and source-backed
+synced Granola excerpts, finalized text utterances, and source-backed
 receipts; raw microphone audio is streamed through the voice provider and is
 not written to application storage.
+
+By default, Receipts resolves the Granola folder named `Demo notes` when the
+app opens, paginates the folder, sorts completed notes by creation time, and
+activates its 10 most recent notes for fact-checking. Repeated loads fetch
+transcripts only for notes that are new or have changed. Override the folder
+name, a specific folder ID, or the note limit with `GRANOLA_DEFAULT_FOLDER_NAME`,
+`GRANOLA_DEFAULT_FOLDER_ID`, and `GRANOLA_DEFAULT_NOTE_LIMIT`.
 
 ## Configuration
 
@@ -31,6 +38,9 @@ Copy `.env.example` to a local ignored env file and provide server-only values:
 
 ```text
 GRANOLA_API_KEY
+GRANOLA_DEFAULT_FOLDER_NAME
+GRANOLA_DEFAULT_FOLDER_ID
+GRANOLA_DEFAULT_NOTE_LIMIT
 INWORLD_API_KEY
 INWORLD_VOICE_ID
 TENSTORRENT_BASE_URL

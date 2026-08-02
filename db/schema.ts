@@ -61,6 +61,19 @@ export const evidenceChunks = sqliteTable(
   ]
 );
 
+export const activeKnowledgeSources = sqliteTable("active_knowledge_sources", {
+  sourceId: integer("source_id")
+    .primaryKey()
+    .references(() => knowledgeSources.id, { onDelete: "cascade" }),
+  activatedAt: text("activated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const syncLeases = sqliteTable("sync_leases", {
+  key: text("key").primaryKey(),
+  token: text("token").notNull(),
+  expiresAt: text("expires_at").notNull(),
+});
+
 export const meetingSessions = sqliteTable("meeting_sessions", {
   id: text("id").primaryKey(),
   startedAt: text("started_at").notNull().default(sql`CURRENT_TIMESTAMP`),
