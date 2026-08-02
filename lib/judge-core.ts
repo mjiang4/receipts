@@ -14,6 +14,9 @@ export type JudgeDecision = {
   materiality: number;
   reason: string;
   evidence: EvidenceRecord[];
+  incorrectSpan?: string | null;
+  correctFact?: string | null;
+  evidenceExcerpt?: string | null;
   mode: "tenstorrent" | "rehearsal" | "safety-fallback";
 };
 
@@ -164,6 +167,9 @@ function rehearsalDecision(claim: string): JudgeDecision {
       materiality: 0.96,
       reason: "The recorded launch day directly contradicts the claim.",
       evidence: [DEMO_EVIDENCE[0]],
+      incorrectSpan: "Monday",
+      correctFact: "Friday, August 7",
+      evidenceExcerpt: DEMO_EVIDENCE[0].quote,
       mode: "rehearsal",
     };
   }
@@ -181,6 +187,9 @@ function rehearsalDecision(claim: string): JudgeDecision {
       materiality: 0.98,
       reason: "The recorded renewal value directly contradicts the claim.",
       evidence: [DEMO_EVIDENCE[1]],
+      incorrectSpan: "$150,000",
+      correctFact: "$120,000",
+      evidenceExcerpt: DEMO_EVIDENCE[1].quote,
       mode: "rehearsal",
     };
   }
@@ -198,6 +207,9 @@ function rehearsalDecision(claim: string): JudgeDecision {
       materiality: 0.92,
       reason: "The latest project status directly contradicts the claim.",
       evidence: [DEMO_EVIDENCE[2]],
+      incorrectSpan: "fully rolled out across the company",
+      correctFact: "still in pilot",
+      evidenceExcerpt: DEMO_EVIDENCE[2].quote,
       mode: "rehearsal",
     };
   }
@@ -214,6 +226,7 @@ function rehearsalDecision(claim: string): JudgeDecision {
       materiality: 0.82,
       reason: "Relevant records assign ownership differently.",
       evidence: [DEMO_EVIDENCE[3], DEMO_EVIDENCE[4]],
+      evidenceExcerpt: DEMO_EVIDENCE[4].quote,
       mode: "rehearsal",
     };
   }

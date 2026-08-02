@@ -759,7 +759,8 @@ input:focus-visible {
 }
 
 .live-pill,
-.secure-pill {
+.secure-pill,
+.transport-pill {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -774,6 +775,17 @@ input:focus-visible {
   letter-spacing: 0.065em;
   text-transform: uppercase;
   backdrop-filter: blur(10px);
+}
+
+.transport-pill {
+  color: #c9d8bf;
+  border-color: rgba(155, 201, 128, 0.22);
+}
+
+.transport-pill--fallback {
+  color: #f6d8a8;
+  border-color: rgba(234, 172, 77, 0.35);
+  background: rgba(69, 45, 18, 0.76);
 }
 
 .live-pill--connected i {
@@ -1036,6 +1048,60 @@ input:focus-visible {
   letter-spacing: -0.02em;
   line-height: 1.25;
 }
+
+.fact-highlight {
+  padding: 0 .12em;
+  border-radius: .2em;
+  color: inherit;
+}
+
+.fact-highlight--wrong {
+  background: rgba(217, 91, 72, 0.2);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.fact-highlight--right { background: rgba(119, 166, 71, 0.23); }
+
+.fact-delta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.fact-delta > span {
+  display: flex;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(23, 23, 20, 0.11);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.25);
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fact-delta small {
+  color: #777766;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.fact-delta del,
+.fact-delta mark {
+  overflow: hidden;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fact-delta del { color: #994f43; }
+.fact-delta mark { color: #496f2d; }
 
 .receipt-card blockquote {
   margin: 12px 0 17px;
@@ -1433,7 +1499,8 @@ input:focus-visible {
   .sound-bars { height: 65px; margin: 18px 0 8px; }
   .receipt-overlay { top: 88px; right: 39px; width: min(380px, calc(100% - 78px)); }
   .control-dock { bottom: 27px; }
-  .secure-pill { display: none; }
+  .secure-pill,
+  .transport-pill { display: none; }
 }
 
 @media (max-width: 580px) {

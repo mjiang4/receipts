@@ -51,6 +51,9 @@ type Receipt = {
   confidence: number;
   reason: string;
   evidence: ReceiptEvidence[];
+  incorrectSpan?: string | null;
+  correctFact?: string | null;
+  evidenceExcerpt?: string | null;
   mode: string;
   createdAt: number;
 };
@@ -145,15 +148,6 @@ function bytesToBase64(bytes: Uint8Array) {
   return btoa(binary);
 }
 
-function base64ToBytes(value: string) {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
 function resampleTo16k(input: Float32Array, sourceRate: number) {
   if (sourceRate === 16000) return input;
   const ratio = sourceRate / 16000;
@@ -199,6 +193,43 @@ function Mascot({ state, compact = false }: { state: AgentState; compact?: boole
   );
 }
 
+function HighlightedText({
+  text,
+  incorrect,
+  correct,
+}: {
+  text: string;
+  incorrect?: string | null;
+  correct?: string | null;
+}) {
+  const matches = [
+    { value: incorrect?.trim(), className: "fact-highlight fact-highlight--wrong" },
+    { value: correct?.trim(), className: "fact-highlight fact-highlight--right" },
+  ]
+    .flatMap((item) => {
+      if (!item.value) return [];
+      const start = text.toLowerCase().indexOf(item.value.toLowerCase());
+      return start < 0 ? [] : [{ ...item, start, end: start + item.value.length }];
+    })
+    .sort((a, b) => a.start - b.start)
+    .filter((item, index, all) => index === 0 || item.start >= all[index - 1].end);
+
+  if (!matches.length) return text;
+  const output: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.start > cursor) output.push(text.slice(cursor, match.start));
+    output.push(
+      <mark className={match.className} key={`${match.start}-${match.value}`}>
+        {text.slice(match.start, match.end)}
+      </mark>,
+    );
+    cursor = match.end;
+  }
+  if (cursor < text.length) output.push(text.slice(cursor));
+  return output;
+}
+
 function ReceiptCard({ receipt, featured = false }: { receipt: Receipt; featured?: boolean }) {
   const evidence = receipt.evidence[0];
   if (!evidence) return null;
@@ -212,16 +243,35 @@ function ReceiptCard({ receipt, featured = false }: { receipt: Receipt; featured
           {isConflict ? "Records conflict" : "Receipt found"}
         </span>
         <span className="receipt-card__confidence">
-          {Math.round(receipt.confidence * 100)}% match
+          {Math.round(receipt.confidence * 100)}% confidence
         </span>
       </div>
-      {receipt.correction && <p className="receipt-card__correction">{receipt.correction}</p>}
+      {receipt.correction && (
+        <p className="receipt-card__correction">
+          <HighlightedText
+            text={receipt.correction}
+            incorrect={receipt.incorrectSpan}
+            correct={receipt.correctFact}
+          />
+        </p>
+      )}
       {isConflict && (
         <p className="receipt-card__correction">
           I found two relevant records that assign this differently, so I’m staying out of it.
         </p>
       )}
-      <blockquote>“{evidence.quote}”</blockquote>
+      {(receipt.incorrectSpan || receipt.correctFact) && (
+        <div className="fact-delta" aria-label="Claim correction">
+          {receipt.incorrectSpan && <span><small>Heard</small><del>{receipt.incorrectSpan}</del></span>}
+          {receipt.correctFact && <span><small>Record says</small><mark>{receipt.correctFact}</mark></span>}
+        </div>
+      )}
+      <blockquote>
+        “<HighlightedText
+          text={receipt.evidenceExcerpt || evidence.quote}
+          correct={receipt.correctFact}
+        />”
+      </blockquote>
       <div className="receipt-card__source">
         <span className="receipt-card__source-mark">G</span>
         <span>
@@ -257,6 +307,9 @@ export function ReceiptsApp() {
   const [cameraOn, setCameraOn] = useState(true);
   const [caption, setCaption] = useState("");
   const [captionFinal, setCaptionFinal] = useState(false);
+  const [checkMessage, setCheckMessage] = useState("Checks run automatically");
+  const [voiceTransport, setVoiceTransport] = useState<"ready" | "inworld" | "fallback">("ready");
+  const [transcriptionTransport, setTranscriptionTransport] = useState<"connecting" | "inworld" | "browser">("connecting");
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [drawer, setDrawer] = useState<"sources" | null>(null);
   const [granolaNotes, setGranolaNotes] = useState<GranolaNote[]>([]);
@@ -277,20 +330,21 @@ export function ReceiptsApp() {
   const sentenceHistoryRef = useRef<string[]>([]);
   const pendingSentencesRef = useRef<string[]>([]);
   const sentenceBatchTimerRef = useRef<number | null>(null);
+  const joinedRef = useRef(false);
+  const micOnRef = useRef(true);
   const lastFinalRef = useRef({ fingerprint: "", capturedAt: 0 });
   const busyRef = useRef(false);
   const checkQueueRef = useRef<CheckRequest[]>([]);
   const sessionIdRef = useRef(crypto.randomUUID());
   const dedupeRef = useRef(new Map<string, number>());
   const checkClaimRef = useRef<(claim: string, manual?: boolean, demoOnly?: boolean) => void>(() => {});
-  const ttsNextTimeRef = useRef(0);
 
   const featuredReceipt = receipts[0] ?? null;
   const providersConfigured =
     status.inworld && status.granola && status.tenstorrent;
 
   const providerLabel = useMemo(() => {
-    if (status.mode === "live") return "Live · checking every 2–3 sentences";
+    if (status.mode === "live") return "Live · automatic fact-checking";
     if (providersConfigured && !status.databaseReady) {
       return "Database unavailable";
     }
@@ -354,6 +408,7 @@ export function ReceiptsApp() {
 
   const speakWithBrowser = useCallback(
     (text: string) => {
+      setVoiceTransport("fallback");
       if (!("speechSynthesis" in window)) {
         releaseMicAfterSpeech();
         return;
@@ -370,163 +425,42 @@ export function ReceiptsApp() {
     [releaseMicAfterSpeech],
   );
 
-  const schedulePcmAudio = useCallback((encoded: string) => {
-    const bytes = base64ToBytes(encoded);
-    let dataOffset = 0;
-    let sampleRate = 24000;
-
-    if (
-      bytes.length > 44 &&
-      String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF"
-    ) {
-      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      sampleRate = view.getUint32(24, true) || 24000;
-      for (let index = 12; index + 8 < bytes.length; ) {
-        const label = String.fromCharCode(...bytes.subarray(index, index + 4));
-        const size = view.getUint32(index + 4, true);
-        if (label === "data") {
-          dataOffset = index + 8;
-          break;
-        }
-        index += 8 + size + (size % 2);
-      }
-    }
-
-    const sampleBytes = bytes.subarray(dataOffset);
-    const sampleCount = Math.floor(sampleBytes.byteLength / 2);
-    if (!sampleCount) return 0;
-    const context =
-      ttsContextRef.current ?? audioContextRef.current ?? new AudioContext();
-    ttsContextRef.current = context;
-    void context.resume();
-    const buffer = context.createBuffer(1, sampleCount, sampleRate);
-    const channel = buffer.getChannelData(0);
-    const view = new DataView(
-      sampleBytes.buffer,
-      sampleBytes.byteOffset,
-      sampleCount * 2,
-    );
-    for (let index = 0; index < sampleCount; index += 1) {
-      channel[index] = view.getInt16(index * 2, true) / 32768;
-    }
-    const source = context.createBufferSource();
-    source.buffer = buffer;
-    source.connect(context.destination);
-    const scheduled = Math.max(
-      context.currentTime + 0.035,
-      ttsNextTimeRef.current,
-    );
-    source.start(scheduled);
-    const end = scheduled + buffer.duration;
-    ttsNextTimeRef.current = end;
-    return Math.max(0, end - context.currentTime);
-  }, []);
-
   const speakWithInworld = useCallback(
-    (text: string, voiceId: string) => {
-      let settled = false;
-      let heardAudio = false;
-      let remainingSeconds = 0;
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${protocol}//${window.location.host}/api/inworld/tts`);
-      let hardStopTimer = 0;
-
-      const finishAfterProviderFailure = () => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(fallbackTimer);
-        window.clearTimeout(hardStopTimer);
-        if (heardAudio) {
-          window.setTimeout(
-            releaseMicAfterSpeech,
-            remainingSeconds * 1000 + 120,
-          );
-        } else {
-          speakWithBrowser(text);
-        }
-      };
-
-      const fallbackTimer = window.setTimeout(() => {
-        if (!heardAudio && !settled) {
-          settled = true;
-          window.clearTimeout(hardStopTimer);
-          socket.close();
-          speakWithBrowser(text);
-        }
-      }, 2500);
-      hardStopTimer = window.setTimeout(() => {
-        if (settled) return;
-        socket.close();
-        finishAfterProviderFailure();
-      }, 15_000);
-
-      socket.onopen = () => {
-        socket.send(
-          JSON.stringify({
-            create: {
-              voiceId,
-              modelId: "inworld-tts-2",
-              audioConfig: {
-                audioEncoding: "LINEAR16",
-                sampleRateHertz: 24000,
-              },
-              bufferCharThreshold: 40,
-              autoMode: true,
-              timestampType: "WORD",
-              timestampTransportStrategy: "ASYNC",
-            },
-            contextId: "receipts",
-          }),
-        );
-        socket.send(
-          JSON.stringify({
-            send_text: { text, flush_context: {} },
-            contextId: "receipts",
-          }),
-        );
-      };
-      socket.onmessage = (event) => {
-        try {
-          const message = JSON.parse(String(event.data));
-          const result = message.result;
-          if (result?.audioChunk?.audioContent) {
-            heardAudio = true;
-            remainingSeconds = Math.max(
-              remainingSeconds,
-              schedulePcmAudio(result.audioChunk.audioContent),
-            );
-          }
-          if (result?.flushCompleted && !settled) {
-            settled = true;
-            window.clearTimeout(fallbackTimer);
-            window.clearTimeout(hardStopTimer);
-            window.setTimeout(releaseMicAfterSpeech, remainingSeconds * 1000 + 120);
-            socket.send(
-              JSON.stringify({ close_context: {}, contextId: "receipts" }),
-            );
-          }
-        } catch {
-          // Ignore malformed provider events; silence is safer than retrying speech.
-        }
-      };
-      socket.onerror = () => {
-        finishAfterProviderFailure();
-      };
-      socket.onclose = () => {
-        finishAfterProviderFailure();
-      };
+    async (text: string) => {
+      try {
+        const response = await fetch("/api/voice", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (!response.ok) throw new Error("Inworld voice unavailable");
+        const encodedAudio = await response.arrayBuffer();
+        const context =
+          ttsContextRef.current ?? audioContextRef.current ?? new AudioContext();
+        ttsContextRef.current = context;
+        await context.resume();
+        const decoded = await context.decodeAudioData(encodedAudio.slice(0));
+        const source = context.createBufferSource();
+        source.buffer = decoded;
+        source.connect(context.destination);
+        source.onended = releaseMicAfterSpeech;
+        setVoiceTransport("inworld");
+        source.start();
+      } catch {
+        speakWithBrowser(text);
+      }
     },
-    [releaseMicAfterSpeech, schedulePcmAudio, speakWithBrowser],
+    [releaseMicAfterSpeech, speakWithBrowser],
   );
 
   const speakCorrection = useCallback(
     (text: string) => {
       suppressMicRef.current = true;
       setAgentState("speaking");
-      if (status.inworld) speakWithInworld(text, status.voiceId);
+      if (status.inworld) void speakWithInworld(text);
       else speakWithBrowser(text);
     },
-    [speakWithBrowser, speakWithInworld, status.inworld, status.voiceId],
+    [speakWithBrowser, speakWithInworld, status.inworld],
   );
 
   const checkClaim = useCallback(
@@ -553,6 +487,7 @@ export function ReceiptsApp() {
       busyRef.current = true;
       const requestSessionId = sessionIdRef.current;
       setAgentState("thinking");
+      setCheckMessage(manual ? "Checking that now…" : "Checking the latest speech…");
 
       try {
         const sentences = splitFinalizedSentences(boundedClaim).slice(-5);
@@ -584,6 +519,11 @@ export function ReceiptsApp() {
           };
           setReceipts((current) => [receipt, ...current].slice(0, 5));
           setAgentState("found");
+          setCheckMessage(
+            decision.action === "speak"
+              ? "Contradiction found"
+              : "Relevant records conflict",
+          );
           if (decision.action === "speak" && decision.correction) {
             suppressMicRef.current = true;
             window.setTimeout(() => speakCorrection(decision.correction), 180);
@@ -592,9 +532,15 @@ export function ReceiptsApp() {
           }
         } else {
           setAgentState("listening");
+          setCheckMessage(
+            decision.mode === "safety-fallback"
+              ? "Check unavailable · will retry automatically"
+              : "Checked just now · no contradiction",
+          );
         }
       } catch {
         setAgentState("listening");
+        setCheckMessage("Check unavailable · will retry automatically");
       } finally {
         busyRef.current = false;
         drainQueuedCheck();
@@ -653,7 +599,8 @@ export function ReceiptsApp() {
       checkClaimRef.current(batch.join(" "), false, false);
     }
 
-    if (pendingSentencesRef.current.length >= 2) {
+    if (pendingSentencesRef.current.length > 0) {
+      const idleDelay = pendingSentencesRef.current.length >= 2 ? 1_200 : 2_300;
       sentenceBatchTimerRef.current = window.setTimeout(() => {
         const flushed = flushIdleSentenceBatch(pendingSentencesRef.current);
         pendingSentencesRef.current = flushed.pending;
@@ -661,7 +608,7 @@ export function ReceiptsApp() {
         if (flushed.batch) {
           checkClaimRef.current(flushed.batch.join(" "), false, false);
         }
-      }, 1_500);
+      }, idleDelay);
     }
   }, []);
 
@@ -699,6 +646,7 @@ export function ReceiptsApp() {
       ).webkitSpeechRecognition;
     if (!recognitionConstructor) return;
 
+    setTranscriptionTransport("browser");
     const recognition = new recognitionConstructor();
     recognition.continuous = true;
     recognition.interimResults = true;
@@ -716,7 +664,7 @@ export function ReceiptsApp() {
     };
     recognition.onerror = () => undefined;
     recognition.onend = () => {
-      if (joined && micOn && !suppressMicRef.current) {
+      if (joinedRef.current && micOnRef.current && !suppressMicRef.current) {
         try {
           recognition.start();
         } catch {
@@ -731,15 +679,13 @@ export function ReceiptsApp() {
     } catch {
       fallbackRecognitionStartedRef.current = false;
     }
-  }, [handleFinalTranscript, joined, micOn]);
+  }, [handleFinalTranscript]);
 
   const openSttSocket = useCallback(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${window.location.host}/api/inworld/stt`);
     sttSocketRef.current = socket;
-    let opened = false;
     socket.onopen = () => {
-      opened = true;
       socket.send(
         JSON.stringify({
           transcribeConfig: {
@@ -760,12 +706,26 @@ export function ReceiptsApp() {
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data));
+        if (typeof message.code === "number" && message.code !== 0) {
+          socket.close();
+          startBrowserRecognition();
+          return;
+        }
         const result = message.result;
+        if (typeof result?.status?.code === "number" && result.status.code !== 0) {
+          socket.close();
+          startBrowserRecognition();
+          return;
+        }
+        if (result?.speechStopped && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ endTurn: {} }));
+        }
         if (result?.speechStarted && !suppressMicRef.current) {
           setAgentState("listening");
           setCaptionFinal(false);
         }
         if (result?.transcription?.transcript && !suppressMicRef.current) {
+          setTranscriptionTransport("inworld");
           const text = result.transcription.transcript.trim();
           setCaption(text);
           setCaptionFinal(Boolean(result.transcription.isFinal));
@@ -776,12 +736,16 @@ export function ReceiptsApp() {
       }
     };
     socket.onerror = () => {
-      if (!opened) startBrowserRecognition();
+      if (joinedRef.current && micOnRef.current && !suppressMicRef.current) {
+        startBrowserRecognition();
+      }
     };
     socket.onclose = () => {
-      if (joined && !suppressMicRef.current) startBrowserRecognition();
+      if (joinedRef.current && micOnRef.current && !suppressMicRef.current) {
+        startBrowserRecognition();
+      }
     };
-  }, [handleFinalTranscript, joined, startBrowserRecognition]);
+  }, [handleFinalTranscript, startBrowserRecognition]);
 
   const startAudioPipeline = useCallback(async (stream: MediaStream) => {
     try {
@@ -849,9 +813,13 @@ export function ReceiptsApp() {
       }
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
+      joinedRef.current = true;
+      micOnRef.current = true;
       setJoined(true);
       setPermissionState("ready");
       setAgentState("listening");
+      setCheckMessage("Listening · checks run automatically");
+      setTranscriptionTransport("connecting");
       openSttSocket();
       await startAudioPipeline(stream);
     } catch {
@@ -867,6 +835,7 @@ export function ReceiptsApp() {
 
   const toggleMic = useCallback(() => {
     const next = !micOn;
+    micOnRef.current = next;
     setMicOn(next);
     streamRef.current?.getAudioTracks().forEach((track) => {
       track.enabled = next;
@@ -907,6 +876,8 @@ export function ReceiptsApp() {
       sentenceBatchTimerRef.current = null;
     }
     suppressMicRef.current = false;
+    joinedRef.current = false;
+    micOnRef.current = true;
     pendingSentencesRef.current = [];
     sentenceHistoryRef.current = [];
     utterancesRef.current = [];
@@ -916,6 +887,9 @@ export function ReceiptsApp() {
     setJoined(false);
     setAgentState("idle");
     setCaption("");
+    setCheckMessage("Checks run automatically");
+    setVoiceTransport("ready");
+    setTranscriptionTransport("connecting");
     setElapsed(0);
     fallbackRecognitionStartedRef.current = false;
     sessionIdRef.current = crypto.randomUUID();
@@ -1049,7 +1023,7 @@ export function ReceiptsApp() {
                 </div>
                 <div className="preview-listening">
                   <Mascot state="listening" compact />
-                  <span><strong>Receipts is listening</strong><small>Checking every 2–3 sentences</small></span>
+                  <span><strong>Receipts is listening</strong><small>Checking completed thoughts automatically</small></span>
                   <i /><i /><i /><i />
                 </div>
               </div>
@@ -1070,7 +1044,16 @@ export function ReceiptsApp() {
                   ? "Mic paused"
                   : agentState === "speaking"
                     ? "Receipts is speaking"
-                    : "Checks every 2–3 sentences"}
+                    : checkMessage}
+              </span>
+              <span className={cx("transport-pill", (voiceTransport === "fallback" || transcriptionTransport === "browser") && "transport-pill--fallback")}>
+                {transcriptionTransport === "browser"
+                  ? "Browser transcription fallback"
+                  : voiceTransport === "fallback"
+                    ? "Browser voice fallback"
+                    : voiceTransport === "inworld"
+                      ? "Inworld voice active"
+                      : "Inworld connecting"}
               </span>
             </div>
 
@@ -1102,7 +1085,7 @@ export function ReceiptsApp() {
                   ? featuredReceipt?.correction
                   : agentState === "thinking"
                     ? "Checking the latest sentence batch against your synced sources…"
-                    : "I check every 2–3 sentences and interrupt when a source directly contradicts the conversation."}
+                    : "I check each completed thought automatically and interrupt when a source directly contradicts the conversation."}
               </p>
             </aside>
 

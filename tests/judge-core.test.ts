@@ -27,7 +27,7 @@ test("the shipped surface is Receipts, not the starter", async () => {
   assert.match(shipped, /Inworld voice/);
   assert.match(shipped, /Tenstorrent fact-checker/);
   assert.match(shipped, /Granola memory/);
-  assert.match(shipped, /Checks every 2–3 sentences/);
+  assert.match(shipped, /checks run automatically/i);
   assert.doesNotMatch(shipped, /Audio isn’t stored|Partially connected/);
   assert.doesNotMatch(shipped, /codex-preview|Your site is taking shape|SkeletonPreview/i);
   assert.match(app, /appendFinalizedTranscript/);
